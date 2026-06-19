@@ -1,1 +1,100 @@
 # fakecodegen
+
+Generates realistic-looking but completely fake source files for demos, portfolio screenshots, and mockups.  
+Can also **reconstruct a fake repo from an [archscope](https://github.com/Exey/archscope) context prompt**, replicating the exact directory structure, file names, declaration names, and approximate line counts described in the document.
+
+## Install
+
+```bash
+go install github.com/exey/fakecodegen@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/exey/fakecodegen
+cd fakecodegen
+go build -o fakecodegen .
+```
+
+## Usage
+
+### Generate random fake files
+
+```bash
+# 10 Go files in ./output
+fakecodegen -lang go -folder ./output -n 10
+
+# 5 Python files
+fakecodegen -lang py -folder ./output -n 5
+
+# 8 Rust files plus an ARCHSCOPE.md context prompt
+fakecodegen -lang rs -folder ./output -n 8 -prompt
+
+# TypeScript or JavaScript
+fakecodegen -lang ts -folder ./output -n 5
+fakecodegen -lang js -folder ./output -n 5
+```
+
+### Reconstruct a repo from an archscope prompt
+
+Given an archscope context document (`ARCHSCOPE.md`):
+
+```bash
+fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo
+```
+
+This reads the `## Key Files` section and for every entry:
+
+- Creates the exact subdirectory structure (`demo/`, `src/render/`, …)
+- Generates a fake source file whose functions are named after the declarations listed in the prompt
+- Targets approximately the same line count as the original
+
+The language/renderer is detected automatically from each file's extension.  
+Pass `-lang` to override all files with a specific renderer:
+
+```bash
+# Force Go renderer even though the prompt describes a Rust project
+fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -lang go
+```
+
+Add `-prompt` to write a fresh `ARCHSCOPE.md` summarising the generated output:
+
+```bash
+fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -prompt
+```
+
+## Flags
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `-lang` | `go` | Renderer to use: `go`, `py`, `rs`. In `-from-prompt` mode auto-detected per file; this flag overrides. |
+| `-folder` | `output` | Output directory (created if it does not exist). |
+| `-n` | `1` | Number of files to generate (normal mode only). |
+| `-prompt` | `false` | Write `ARCHSCOPE.md` in the output folder describing the generated files. |
+| `-from-prompt` | — | Path to an archscope context document. Reconstructs the described file tree. |
+
+## Supported renderers
+
+| Extension | Output style |
+| --------- | ------------ |
+| `.go` | `package generated` + top-level `func` declarations + `func init()` for loose statements |
+| `.py` | `def` + indented blocks |
+| `.rs` | `fn` + brace blocks with `let mut` bindings |
+| `.js` | `function` + `var`/`let`/`const` assignments |
+| `.ts` | `function(): Type` + typed `let`/`const` assignments |
+| other | Falls back to the Go renderer |
+
+## How it works
+
+1. An AST of arithmetic, boolean, and control-flow nodes is generated randomly.
+2. A language-specific renderer walks the AST and emits source text.
+3. Variable and function names are drawn from a curated `names.txt` word list (1 500+ tokens from real codebases).
+4. Sloppy comments (`// trust me bro`, `// HACK: this works somehow`, …) are sprinkled in at ~18% probability.
+
+In `-from-prompt` mode the declaration names extracted from the prompt are used directly as function names, and `maxDepth` is tuned per-file so the rendered output lands near the target line count.
+
+
+## License
+
+MIT
