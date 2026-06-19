@@ -89,8 +89,9 @@ func (BoolLit) isExpression()      {}
 type Statement interface{ isStatement() }
 
 type Assignment struct {
-	Name  string
-	Value Expression
+	Name   string
+	Value  Expression
+	IsDecl bool // true = new variable declaration (:= / let / var); false = reassignment (=)
 }
 
 type IfStmt struct {
@@ -111,9 +112,9 @@ type ForStmt struct {
 }
 
 type FuncDef struct {
-	Name   string
-	Params []string
-	Body   []Statement
+	Name       string
+	ParamNames []string
+	Body       []Statement
 }
 
 type ReturnStmt struct{ Value Expression }

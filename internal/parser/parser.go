@@ -18,16 +18,34 @@ type FileSpec struct {
 	Decls []string // declaration/function names listed after "—"
 }
 
+// Contributor describes one author from the ### Contributors table.
+type Contributor struct {
+	Name    string
+	Commits int
+	Files   int
+}
+
+// LongestFunc records a function name and its line count from the
+// ## Longest Functions table.  Used to tune per-function generation depth.
+type LongestFunc struct {
+	Name  string
+	Lines int
+}
+
 // PromptSpec is the parsed result of an archscope context document.
 type PromptSpec struct {
-	Platform string     // e.g. "Rust", "Go", "Python"
-	Module   string     // module/folder name
-	Files    []FileSpec
+	Platform      string        // e.g. "Rust", "Go", "Python"
+	Module        string        // module/folder name (first module from ## Overview)
+	TechStack     []string      // tools listed under ## Tech Stack
+	TotalFiles    int           // from ## Overview "Files: N"
+	TotalLines    int           // from ## Overview "Lines: N"
+	Files         []FileSpec
+	Contributors  []Contributor  // from ### Contributors table
+	LongestFuncs  []LongestFunc  // from ## Longest Functions table
+	InboundRoutes []string       // from ## Inbound Traffic bullet list
 }
 
 // Ext returns the file extension that best represents the platform.
-// Falls back to counting extensions in the file list when the platform
-// name is not recognised.
 func (p *PromptSpec) Ext() string {
 	switch strings.ToLower(strings.TrimSpace(p.Platform)) {
 	case "go":
@@ -60,29 +78,83 @@ func (p *PromptSpec) Ext() string {
 	}
 }
 
-// keyFileRe matches lines like:
-//
-//	- `path/to/file.rs` (1012 lines) — decl1, decl2, decl3
+// LongestFuncMap returns a name→lines lookup for quick access during generation.
+func (p *PromptSpec) LongestFuncMap() map[string]int {
+	m := make(map[string]int, len(p.LongestFuncs))
+	for _, lf := range p.LongestFuncs {
+		m[lf.Name] = lf.Lines
+	}
+	return m
+}
+
 var keyFileRe = regexp.MustCompile("^-\\s+`([^`]+)`\\s+\\((\\d+)\\s+lines?\\)(?:\\s+—\\s+(.+))?$")
 
-// Parse reads an archscope-format context document and extracts file specs.
+var contributorRowRe = regexp.MustCompile(`^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|`)
+
+// longestFuncRowRe matches lines like: | normalizeDictTitle | 404 | bki (...) |
+var longestFuncRowRe = regexp.MustCompile(`^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|`)
+
+// overviewRe matches "**Files:** 569 | **Lines:** 99202" anywhere in a line.
+var overviewFilesRe = regexp.MustCompile(`\*\*Files:\*\*\s*(\d+)`)
+var overviewLinesRe = regexp.MustCompile(`\*\*Lines:\*\*\s*(\d+)`)
+
+// inboundRouteRe matches "- [REST] /path" or "- [gRPC] ServiceName".
+var inboundRouteRe = regexp.MustCompile(`^-\s+\[(REST|gRPC)\]\s+(.+)$`)
+
+// Parse reads an archscope-format context document and extracts file specs
+// and all supplementary metadata sections.
 func Parse(content string) (*PromptSpec, error) {
 	spec := &PromptSpec{}
-	inKeyFiles := false
+
+	type section int
+	const (
+		secNone section = iota
+		secOverview
+		secTechStack
+		secKeyFiles
+		secContributors
+		secLongestFuncs
+		secInboundTraffic
+	)
+	cur := secNone
 
 	sc := bufio.NewScanner(strings.NewReader(content))
 	for sc.Scan() {
 		raw := sc.Text()
 		line := strings.TrimRight(raw, " \t")
 
-		// Section headers
+		// ## section headers (level 2)
 		if strings.HasPrefix(line, "## ") {
-			heading := strings.TrimPrefix(line, "## ")
-			inKeyFiles = strings.EqualFold(strings.TrimSpace(heading), "key files")
+			heading := strings.TrimSpace(strings.TrimPrefix(line, "## "))
+			switch strings.ToLower(heading) {
+			case "overview":
+				cur = secOverview
+			case "tech stack":
+				cur = secTechStack
+			case "key files":
+				cur = secKeyFiles
+			case "longest functions":
+				cur = secLongestFuncs
+			case "inbound traffic":
+				cur = secInboundTraffic
+			default:
+				cur = secNone
+			}
 			continue
 		}
 
-		// Platform: `- **Platform:** Rust`
+		// ### subsection headers (level 3)
+		if strings.HasPrefix(line, "### ") {
+			heading := strings.TrimSpace(strings.TrimPrefix(line, "### "))
+			if strings.EqualFold(heading, "contributors") {
+				cur = secContributors
+			} else {
+				cur = secNone
+			}
+			continue
+		}
+
+		// Platform: `- **Platform:** Rust` (appears in Overview or as standalone)
 		if strings.Contains(line, "**Platform:**") {
 			parts := strings.SplitN(line, "**Platform:**", 2)
 			if len(parts) == 2 {
@@ -91,17 +163,43 @@ func Parse(content string) (*PromptSpec, error) {
 			continue
 		}
 
-		// Module: `- **Modules:** sloppify`
+		// Modules: `- **Modules:** api-gw, auth, …`
 		if strings.Contains(line, "**Modules:**") {
 			parts := strings.SplitN(line, "**Modules:**", 2)
 			if len(parts) == 2 {
-				spec.Module = strings.TrimSpace(parts[1])
+				// Store first module as canonical module name
+				mods := strings.Split(strings.TrimSpace(parts[1]), ",")
+				if len(mods) > 0 {
+					spec.Module = strings.TrimSpace(mods[0])
+				}
 			}
 			continue
 		}
 
-		// Key-file entry
-		if inKeyFiles {
+		switch cur {
+		case secOverview:
+			// Parse "Files: 569 | Lines: 99202" from the Overview bullet
+			if m := overviewFilesRe.FindStringSubmatch(line); m != nil {
+				spec.TotalFiles, _ = strconv.Atoi(m[1])
+			}
+			if m := overviewLinesRe.FindStringSubmatch(line); m != nil {
+				spec.TotalLines, _ = strconv.Atoi(m[1])
+			}
+
+		case secTechStack:
+			// Tech stack is a single comma-separated line (or multi-line)
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			for _, t := range strings.Split(trimmed, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					spec.TechStack = append(spec.TechStack, t)
+				}
+			}
+
+		case secKeyFiles:
 			if m := keyFileRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
 				lineCount, _ := strconv.Atoi(m[2])
 				var decls []string
@@ -118,6 +216,44 @@ func Parse(content string) (*PromptSpec, error) {
 					Lines: lineCount,
 					Decls: decls,
 				})
+			}
+
+		case secContributors:
+			if strings.HasPrefix(line, "|--") || strings.HasPrefix(line, "| Author") || strings.HasPrefix(line, "| ---") {
+				continue
+			}
+			if m := contributorRowRe.FindStringSubmatch(line); m != nil {
+				commits, _ := strconv.Atoi(m[2])
+				files, _ := strconv.Atoi(m[3])
+				name := strings.TrimSpace(m[1])
+				if name != "" && commits > 0 {
+					spec.Contributors = append(spec.Contributors, Contributor{
+						Name:    name,
+						Commits: commits,
+						Files:   files,
+					})
+				}
+			}
+
+		case secLongestFuncs:
+			// Skip header/separator rows
+			if strings.HasPrefix(line, "| Function") || strings.HasPrefix(line, "|--") || strings.HasPrefix(line, "| ---") {
+				continue
+			}
+			if m := longestFuncRowRe.FindStringSubmatch(line); m != nil {
+				lines, _ := strconv.Atoi(m[2])
+				name := strings.TrimSpace(m[1])
+				if name != "" && lines > 0 {
+					spec.LongestFuncs = append(spec.LongestFuncs, LongestFunc{Name: name, Lines: lines})
+				}
+			}
+
+		case secInboundTraffic:
+			if m := inboundRouteRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+				route := strings.TrimSpace(m[2])
+				if route != "" {
+					spec.InboundRoutes = append(spec.InboundRoutes, route)
+				}
 			}
 		}
 	}

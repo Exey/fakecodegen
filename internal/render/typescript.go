@@ -97,7 +97,12 @@ func (r *TypeScriptRenderer) renderStmt(stmt ast.Statement, out *strings.Builder
 		r.w.Dec()
 		r.w.Line(out, "}")
 	case ast.FuncDef:
-		r.w.Line(out, fmt.Sprintf("function %s(): %s {", s.Name, randTSType()))
+		var params []string
+		for _, p := range s.ParamNames {
+			params = append(params, fmt.Sprintf("%s: %s", p, randTSType()))
+		}
+		paramStr := strings.Join(params, ", ")
+		r.w.Line(out, fmt.Sprintf("function %s(%s): %s {", s.Name, paramStr, randTSType()))
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
 		r.w.Dec()

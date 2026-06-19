@@ -94,7 +94,8 @@ func (r *JavaScriptRenderer) renderStmt(stmt ast.Statement, out *strings.Builder
 		r.w.Dec()
 		r.w.Line(out, "}")
 	case ast.FuncDef:
-		r.w.Line(out, fmt.Sprintf("function %s() {", s.Name))
+		params := strings.Join(s.ParamNames, ", ")
+		r.w.Line(out, fmt.Sprintf("function %s(%s) {", s.Name, params))
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
 		r.w.Dec()

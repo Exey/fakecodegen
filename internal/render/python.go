@@ -90,7 +90,8 @@ func (r *PythonRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.renderBlock(s.Body, out)
 		r.w.Dec()
 	case ast.FuncDef:
-		r.w.Line(out, fmt.Sprintf("def %s():", s.Name))
+		params := strings.Join(s.ParamNames, ", ")
+		r.w.Line(out, fmt.Sprintf("def %s(%s):", s.Name, params))
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
 		r.w.Dec()

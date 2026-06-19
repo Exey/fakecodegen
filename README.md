@@ -1,4 +1,4 @@
-# fakecodegen
+# 🪵 fakecodegen
 
 Generates realistic-looking but completely fake source files for demos, portfolio screenshots, and mockups.  
 Can also **reconstruct a fake repo from an [archscope](https://github.com/Exey/archscope) context prompt**, replicating the exact directory structure, file names, declaration names, and approximate line counts described in the document.
@@ -13,6 +13,23 @@ fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo
 
 That's it — `./fake-repo` is now a full fake Go codebase cloned from the archscope prompt, ready for demos or AI context.  
 Swap in any archscope `.md` from your own project to reconstruct its structure.
+
+### Add a realistic `.git` history
+
+Pass `--start-date` to create a real git repository with a commit for every business day between the given date and today. Commit authors and weights are taken from the `### Contributors` table in the archscope prompt:
+
+```bash
+fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo --start-date 2024-01-15
+```
+
+```text
+fake-repo/
+├── project-go/
+│   ├── auth/…
+│   └── services/…
+├── README.md          ← auto-generated from prompt metadata
+└── .git/              ← full history on business days since 2024-01-15
+```
 
 ## Install
 
@@ -79,11 +96,12 @@ fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -prompt
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
-| `-lang` | `go` | Renderer to use: `go`, `py`, `rs`. In `-from-prompt` mode auto-detected per file; this flag overrides. |
+| `-lang` | `go` | Renderer to use: `go`, `py`, `rs`, `js`, `ts`. In `-from-prompt` mode auto-detected per file; this flag overrides. |
 | `-folder` | `output` | Output directory (created if it does not exist). |
 | `-n` | `1` | Number of files to generate (normal mode only). |
 | `-prompt` | `false` | Write `ARCHSCOPE.md` in the output folder describing the generated files. |
-| `-from-prompt` | — | Path to an archscope context document. Reconstructs the described file tree. |
+| `-from-prompt` | — | Path to an archscope context document. Reconstructs the described file tree and writes `README.md`. |
+| `--start-date` | — | Generate a `.git` repository with one commit per business day from this date to today (format: `2025-01-15`). Contributor names and commit weights are taken from the `### Contributors` table in the prompt. |
 
 ## Supported renderers
 

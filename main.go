@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/exey/fakecodegen/internal/generator"
+	"github.com/exey/fakecodegen/internal/gitgen"
 	"github.com/exey/fakecodegen/internal/parser"
 	"github.com/exey/fakecodegen/internal/prompt"
 	"github.com/exey/fakecodegen/internal/render"
@@ -79,14 +81,18 @@ func usage() {
 
 Usage:
   Generate random files:
-    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt]
+    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01]
 
   Reconstruct a repo from an archscope prompt:
-    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>]
+    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01]
 
 Flags:
 `)
 	flag.PrintDefaults()
+}
+
+func parseStartDate(s string) (time.Time, error) {
+	return time.Parse("2006-01-02", s)
 }
 
 func main() {
@@ -95,6 +101,7 @@ func main() {
 	count := flag.Int("n", 1, "Number of files to generate (normal mode only)")
 	promptFlag := flag.Bool("prompt", false, "Write ARCHSCOPE.md context prompt alongside the generated files")
 	fromPrompt := flag.String("from-prompt", "", "Path to an archscope context document; reconstruct the described file tree")
+	startDate := flag.String("start-date", "", "Generate a fake .git history starting from this date (format: 2025-05-01); only business days get commits")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -105,6 +112,19 @@ func main() {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to create %q: %v\n", outputDir, err)
 		os.Exit(1)
+	}
+
+	// Parse start date early so we can fail fast before generating files.
+	var gitStart time.Time
+	var doGit bool
+	if *startDate != "" {
+		var err error
+		gitStart, err = parseStartDate(*startDate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: -start-date must be in YYYY-MM-DD format, got %q: %v\n", *startDate, err)
+			os.Exit(1)
+		}
+		doGit = true
 	}
 
 	// ── from-prompt mode ──────────────────────────────────────────────────────
@@ -120,14 +140,19 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Build a per-function line-count hint map from the ## Longest Functions
+		// section so that key functions are generated at the right depth.
+		funcLineHints := spec.LongestFuncMap()
+
 		var fileInfos []prompt.FileInfo
+		var filePaths []string
 		for _, fs := range spec.Files {
 			ext := extForFile(fs.Path, *lang)
 
 			state := generator.NewTargeted(fs.Lines, fs.Decls, names, rng)
-			program := state.GenerateProgramWithDecls(fs.Decls)
+			program := state.GenerateProgramWithDeclsAndHints(fs.Decls, funcLineHints)
 
-			source, err := render.RenderSourceFile(program, ext)
+			source, err := render.RenderSourceFile(program, ext, fs.Path)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error rendering %q: %v\n", fs.Path, err)
 				os.Exit(1)
@@ -149,6 +174,20 @@ func main() {
 				Lines: countLines(source),
 				Decls: generator.FunctionNames(program),
 			})
+			filePaths = append(filePaths, fs.Path)
+		}
+
+		// Always write README.md describing the reconstructed project.
+		readmeCfg := prompt.ReadmeConfig{
+			Spec:       spec,
+			FolderName: filepath.Base(outputDir),
+		}
+		readmeDoc := prompt.GenerateReadme(readmeCfg)
+		readmePath := filepath.Join(outputDir, "README.md")
+		if err := os.WriteFile(readmePath, []byte(readmeDoc), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write README.md: %v\n", err)
+		} else {
+			fmt.Println(readmePath)
 		}
 
 		if *promptFlag {
@@ -157,10 +196,11 @@ func main() {
 				promptLang = *lang
 			}
 			cfg := prompt.Config{
-				Lang:       strings.ToLower(promptLang),
-				FolderName: filepath.Base(outputDir),
-				Files:      fileInfos,
-				Rng:        rng,
+				Lang:         strings.ToLower(promptLang),
+				FolderName:   filepath.Base(outputDir),
+				Files:        fileInfos,
+				Contributors: spec.Contributors,
+				Rng:          rng,
 			}
 			doc := prompt.Generate(cfg)
 			promptPath := filepath.Join(outputDir, "ARCHSCOPE.md")
@@ -169,6 +209,25 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println(promptPath)
+		}
+
+		if doGit {
+			contributors := spec.Contributors
+			if len(contributors) == 0 {
+				contributors = defaultContributors()
+			}
+			gcfg := gitgen.Config{
+				OutputDir:    outputDir,
+				StartDate:    gitStart,
+				Contributors: contributors,
+				FilePaths:    filePaths,
+				Rng:          rng,
+			}
+			if err := gitgen.Generate(gcfg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: git history generation failed: %v\n", err)
+			} else {
+				fmt.Printf("generated .git in %s\n", outputDir)
+			}
 		}
 
 		fmt.Printf("generated %d files in %s\n", len(spec.Files), outputDir)
@@ -191,12 +250,17 @@ func main() {
 
 	filenames := generateFilenames(*count, ext, rng)
 	var fileInfos []prompt.FileInfo
+	var filePaths []string
+
+	// Share the generated-name set across all files so that two files in the
+	// same Go package never declare the same top-level function name.
+	sharedGenerated := make(map[string]bool)
 
 	for _, filename := range filenames {
-		state := generator.New(5, names, rng)
+		state := generator.NewShared(5, sharedGenerated, names, rng)
 		program := state.GenerateProgram()
 
-		source, err := render.RenderSourceFile(program, ext)
+		source, err := render.RenderSourceFile(program, ext, filename)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -214,6 +278,7 @@ func main() {
 			Lines: countLines(source),
 			Decls: generator.FunctionNames(program),
 		})
+		filePaths = append(filePaths, filename)
 	}
 
 	if *promptFlag {
@@ -232,5 +297,32 @@ func main() {
 		fmt.Println(promptPath)
 	}
 
+	if doGit {
+		gcfg := gitgen.Config{
+			OutputDir:    outputDir,
+			StartDate:    gitStart,
+			Contributors: defaultContributors(),
+			FilePaths:    filePaths,
+			Rng:          rng,
+		}
+		if err := gitgen.Generate(gcfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: git history generation failed: %v\n", err)
+		} else {
+			fmt.Printf("generated .git in %s\n", outputDir)
+		}
+	}
+
 	fmt.Printf("generated %d files in %s\n", len(filenames), outputDir)
+}
+
+// defaultContributors returns a small set of plausible contributors used when
+// no archscope prompt (with a Contributors table) is available.
+func defaultContributors() []parser.Contributor {
+	return []parser.Contributor{
+		{Name: "Alice Chen", Commits: 87, Files: 342},
+		{Name: "Bob Kim", Commits: 54, Files: 210},
+		{Name: "Carlos Ruiz", Commits: 31, Files: 98},
+		{Name: "Diana Lee", Commits: 19, Files: 67},
+		{Name: "Ethan Park", Commits: 11, Files: 28},
+	}
 }

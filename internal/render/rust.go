@@ -100,7 +100,12 @@ func (r *RustRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Line(out, "}")
 	case ast.FuncDef:
 		ret := randRustReturn()
-		r.w.Line(out, fmt.Sprintf("fn %s() -> %s {", s.Name, ret))
+		var params []string
+		for _, p := range s.ParamNames {
+			params = append(params, fmt.Sprintf("%s: %s", p, randRustType()))
+		}
+		paramStr := strings.Join(params, ", ")
+		r.w.Line(out, fmt.Sprintf("fn %s(%s) -> %s {", s.Name, paramStr, ret))
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
 		r.w.Dec()

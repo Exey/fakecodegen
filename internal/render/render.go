@@ -34,11 +34,13 @@ func (w *IndentWriter) Inc()                        { w.indent++ }
 func (w *IndentWriter) Dec()                        { w.indent-- }
 
 // RenderSourceFile dispatches to the right renderer by extension.
+// filePath is the relative path of the output file and is used by the Go
+// renderer to derive the package name from the directory component.
 // For unrecognised extensions it falls back to the Go renderer.
-func RenderSourceFile(program []ast.Statement, ext string) (string, error) {
+func RenderSourceFile(program []ast.Statement, ext string, filePath string) (string, error) {
 	switch ext {
 	case "go":
-		r := NewGoRenderer()
+		r := NewGoRenderer(filePath)
 		return r.RenderProgram(program), nil
 	case "py":
 		r := NewPythonRenderer()
@@ -54,7 +56,7 @@ func RenderSourceFile(program []ast.Statement, ext string) (string, error) {
 		return r.RenderProgram(program), nil
 	default:
 		// Unknown extension: fall back to Go-like brace syntax.
-		r := NewGoRenderer()
+		r := NewGoRenderer(filePath)
 		return r.RenderProgram(program), nil
 	}
 }
