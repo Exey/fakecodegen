@@ -30,14 +30,12 @@ func GenerateReadme(cfg ReadmeConfig) string {
 		projectName = "project"
 	}
 
-	fmt.Fprintf(&sb, "# %s\n\n", projectName)
-
 	// ── One-line description ──────────────────────────────────────────────────
 	platform := spec.Platform
 	if platform == "" {
 		platform = "Go"
 	}
-	fmt.Fprintf(&sb, "A %s backend platform.\n\n", platform)
+	fmt.Fprintf(&sb, "A %s backend platform — `%s`.\n\n", platform, projectName)
 
 	// ── Stats badge line ─────────────────────────────────────────────────────
 	if spec.TotalFiles > 0 {
@@ -133,9 +131,6 @@ func GenerateReadme(cfg ReadmeConfig) string {
 		}
 		sb.WriteString("\n")
 	}
-
-	// ── License ───────────────────────────────────────────────────────────────
-	sb.WriteString("## License\n\nMIT\n")
 
 	return sb.String()
 }
