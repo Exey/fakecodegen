@@ -3,6 +3,17 @@
 Generates realistic-looking but completely fake source files for demos, portfolio screenshots, and mockups.  
 Can also **reconstruct a fake repo from an [archscope](https://github.com/Exey/archscope) context prompt**, replicating the exact directory structure, file names, declaration names, and approximate line counts described in the document.
 
+## ⚡ Generate Fake Repo in 10 Seconds
+
+```bash
+git clone https://github.com/exey/fakecodegen && cd fakecodegen
+make install
+fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo
+```
+
+That's it — `./fake-repo` is now a full fake Go codebase cloned from the archscope prompt, ready for demos or AI context.  
+Swap in any archscope `.md` from your own project to reconstruct its structure.
+
 ## Install
 
 ```bash
