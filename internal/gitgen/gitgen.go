@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 type Config struct {
 	OutputDir      string               // path to the directory that already contains generated files
 	StartDate      time.Time            // first commit date (must be a business day or earlier)
+	EndDate        time.Time            // last commit date (zero = today)
 	Contributors   []parser.Contributor // authors to use; must be non-empty
 	FilePaths      []string             // relative file paths inside OutputDir (used in commit messages)
 	CommitMessages []string             // realistic commit messages to mix into history
@@ -72,7 +74,11 @@ func Generate(cfg Config) error {
 	// Suppress detached HEAD advice globally for this repo
 	_ = run(dir, "git", "config", "advice.detachedHead", "false")
 
-	days := businessDays(cfg.StartDate, time.Now())
+	end := cfg.EndDate
+	if end.IsZero() {
+		end = time.Now()
+	}
+	days := businessDays(cfg.StartDate, end)
 	if len(days) == 0 {
 		return fmt.Errorf("gitgen: no business days between %s and today", cfg.StartDate.Format("2006-01-02"))
 	}
@@ -80,75 +86,99 @@ func Generate(cfg Config) error {
 	// Weighted author pool: more commits → higher chance to be picked
 	authorPool := buildAuthorPool(cfg.Contributors)
 
-	// Build an author schedule that guarantees every contributor appears at least
-	// once when we have enough days.  Remaining days use random weighted picks.
-	authorSchedule := buildAuthorSchedule(cfg.Contributors, authorPool, len(days)-1, cfg.Rng)
+	// Pre-generate per-day commit counts (5–15 per business day) and build an
+	// author schedule that guarantees every contributor appears at least once.
+	perDay := make([]int, len(days))
+	totalSubsequent := 0
+	for i := range days {
+		perDay[i] = cfg.Rng.IntN(11) + 5
+		if i == 0 {
+			totalSubsequent += perDay[i] - 1 // first commit on day 0 is the initial
+		} else {
+			totalSubsequent += perDay[i]
+		}
+	}
+	authorSchedule := buildAuthorSchedule(cfg.Contributors, authorPool, totalSubsequent, cfg.Rng)
 
-	// First commit: stage all generated files
+	totalCommits := 1 // initial commit
+	for _, n := range perDay {
+		totalCommits += n
+	}
+	totalCommits-- // initial commit already counted in perDay[0]
+	fmt.Fprintf(os.Stderr, "git: staging files...\n")
+
+	// First commit on day 0 (earliest slot): stage all generated files.
 	if err := run(dir, "git", "add", "-A"); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
-
-	author := authorPool[cfg.Rng.IntN(len(authorPool))]
-	authorFlag := fmt.Sprintf("%s <%s>", author, nameToEmail(author))
-	dateStr := fmtGitDate(days[0], cfg.Rng)
-
-	env := []string{
-		"GIT_AUTHOR_DATE=" + dateStr,
-		"GIT_COMMITTER_DATE=" + dateStr,
-	}
+	day0Times := dailyTimestamps(days[0], perDay[0], cfg.Rng)
+	firstAuthor := authorPool[cfg.Rng.IntN(len(authorPool))]
+	firstFlag := fmt.Sprintf("%s <%s>", firstAuthor, nameToEmail(firstAuthor))
+	env := []string{"GIT_AUTHOR_DATE=" + day0Times[0], "GIT_COMMITTER_DATE=" + day0Times[0]}
 	if err := runEnv(dir, env, "git", "commit",
-		"--author="+authorFlag,
+		"--author="+firstFlag,
 		"-m", "feat: initial implementation",
 	); err != nil {
 		return fmt.Errorf("initial commit: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "git: writing %d commits across %d business days...\n", totalCommits, len(days))
 
-	// Subsequent business days: touch 1-3 source files and update the CHANGES
-	// log so every author is credited with real file modifications (not just
-	// empty commits).  A trailing newline appended to a source file is valid
-	// in all supported languages and invisible to compilers.
+	// All subsequent commits: touch 1-3 source files + update CHANGES so every
+	// author is credited with real file modifications.
 	changelogPath := filepath.Join(dir, "CHANGES")
-	for i, day := range days[1:] {
-		author = authorSchedule[i]
-		authorFlag = fmt.Sprintf("%s <%s>", author, nameToEmail(author))
-		dateStr = fmtGitDate(day, cfg.Rng)
+	schedIdx := 0
+	commitsDone := 1 // count the initial commit
+	logEvery := max(1, totalCommits/20) // print ~20 progress lines
+
+	doCommit := func(day time.Time, dateStr string) error {
+		author := authorSchedule[schedIdx]
+		schedIdx++
+		authorFlag := fmt.Sprintf("%s <%s>", author, nameToEmail(author))
 		msg := randomCommitMsg(cfg.FilePaths, cfg.CommitMessages, cfg.Rng)
 
-		// Append a trailing newline to 1-3 randomly chosen source files.
 		if len(cfg.FilePaths) > 0 {
-			touchCount := cfg.Rng.IntN(3) + 1
-			for range touchCount {
+			for range cfg.Rng.IntN(3) + 1 {
 				rel := cfg.FilePaths[cfg.Rng.IntN(len(cfg.FilePaths))]
 				full := filepath.Join(dir, filepath.FromSlash(rel))
-				f, err := os.OpenFile(full, os.O_APPEND|os.O_WRONLY, 0o644)
-				if err == nil {
+				if f, err := os.OpenFile(full, os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 					_, _ = f.WriteString("\n")
 					f.Close()
 					_ = run(dir, "git", "add", filepath.FromSlash(rel))
 				}
 			}
 		}
-
-		// Update the CHANGES log.
 		entry := fmt.Sprintf("%s %s: %s\n", day.Format("2006-01-02"), author, msg)
-		f, err := os.OpenFile(changelogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err == nil {
+		if f, err := os.OpenFile(changelogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 			_, _ = f.WriteString(entry)
 			f.Close()
 			_ = run(dir, "git", "add", "CHANGES")
 		}
 
-		env = []string{
-			"GIT_AUTHOR_DATE=" + dateStr,
-			"GIT_COMMITTER_DATE=" + dateStr,
-		}
+		env := []string{"GIT_AUTHOR_DATE=" + dateStr, "GIT_COMMITTER_DATE=" + dateStr}
 		if err := runEnv(dir, env, "git", "commit",
-			"--allow-empty",
-			"--author="+authorFlag,
-			"-m", msg,
-		); err != nil {
-			return fmt.Errorf("commit on %s: %w", day.Format("2006-01-02"), err)
+			"--allow-empty", "--author="+authorFlag, "-m", msg); err != nil {
+			return err
+		}
+		commitsDone++
+		if commitsDone%logEvery == 0 || commitsDone == totalCommits {
+			fmt.Fprintf(os.Stderr, "git: %d/%d commits (%s)\n",
+				commitsDone, totalCommits, day.Format("2006-01-02"))
+		}
+		return nil
+	}
+
+	// Remaining commits on day 0
+	for _, ts := range day0Times[1:] {
+		if err := doCommit(days[0], ts); err != nil {
+			return fmt.Errorf("commit on %s: %w", days[0].Format("2006-01-02"), err)
+		}
+	}
+	// All commits on subsequent days
+	for i, day := range days[1:] {
+		for _, ts := range dailyTimestamps(day, perDay[i+1], cfg.Rng) {
+			if err := doCommit(day, ts); err != nil {
+				return fmt.Errorf("commit on %s: %w", day.Format("2006-01-02"), err)
+			}
 		}
 	}
 
@@ -295,14 +325,30 @@ func nameToEmail(name string) string {
 	return strings.Join(cleaned, ".") + "@example.com"
 }
 
-// fmtGitDate formats a time as a git-compatible ISO 8601 timestamp with a
-// random time-of-day in working hours (9–18).
-func fmtGitDate(day time.Time, rng *rand.Rand) string {
-	hour := rng.IntN(9) + 9   // 9–17
-	min := rng.IntN(60)
-	sec := rng.IntN(60)
-	t := time.Date(day.Year(), day.Month(), day.Day(), hour, min, sec, 0, time.UTC)
-	return t.Format("2006-01-02T15:04:05 +0000")
+// dailyTimestamps returns n git-format timestamps for the given day, sorted
+// chronologically within working hours (9–18 UTC).
+func dailyTimestamps(day time.Time, n int, rng *rand.Rand) []string {
+	type slot struct{ h, m, s int }
+	slots := make([]slot, n)
+	for i := range slots {
+		slots[i] = slot{rng.IntN(9) + 9, rng.IntN(60), rng.IntN(60)}
+	}
+	sort.Slice(slots, func(i, j int) bool {
+		a, b := slots[i], slots[j]
+		if a.h != b.h {
+			return a.h < b.h
+		}
+		if a.m != b.m {
+			return a.m < b.m
+		}
+		return a.s < b.s
+	})
+	out := make([]string, n)
+	for i, s := range slots {
+		t := time.Date(day.Year(), day.Month(), day.Day(), s.h, s.m, s.s, 0, time.UTC)
+		out[i] = t.Format("2006-01-02T15:04:05 +0000")
+	}
+	return out
 }
 
 // randomCommitMsg picks a commit message. When commitMessages is non-empty,

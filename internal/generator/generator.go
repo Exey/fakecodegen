@@ -1236,6 +1236,12 @@ func (s *State) GenerateGoProgramWithDecls(declNames []string, funcLineHints map
 	for _, name := range declNames {
 		if s.isValidIdent(name) && !s.generated[name] {
 			s.generated[name] = true
+			// Reserve the lowercase form so genStructDecl/genInterfaceDecl can't
+			// capitalise the same word and produce a redeclaration (e.g. "body"→"Body").
+			if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+				lower := string(name[0]-'A'+'a') + name[1:]
+				s.generated[lower] = true
+			}
 			if hint, ok := funcLineHints[name]; ok && hint > 0 {
 				saved := s.maxDepth
 				s.maxDepth = estimateDepth(hint, 1)
@@ -1255,12 +1261,13 @@ func (s *State) GenerateGoProgramWithDecls(declNames []string, funcLineHints map
 		}
 	}
 
-	// Stubs for any referenced helpers.
+	// Stubs for helper functions called from this file's function bodies.
+	// declNames are already in s.generated (marked above), so generateDomainFuncName
+	// never picks a stub name that collides with a declared function. With a
+	// per-package shared generated map, each stub name is chosen only once across
+	// all files in the package, preventing redeclarations.
 	for stubName, argCount := range s.stubs {
-		if !s.generated[stubName] {
-			s.generated[stubName] = true
-			program = append(program, s.genStub(stubName, argCount))
-		}
+		program = append(program, s.genStub(stubName, argCount))
 	}
 
 	// Init-scope statements — keep this short so declared functions stay longest.

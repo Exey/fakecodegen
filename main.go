@@ -82,10 +82,10 @@ func usage() {
 
 Usage:
   Generate random files:
-    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01]
+    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01] [-end-date 2025-06-01]
 
   Reconstruct a repo from an archscope prompt:
-    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01]
+    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01] [-end-date 2025-06-01]
 
 Flags:
 `)
@@ -103,6 +103,7 @@ func main() {
 	promptFlag := flag.Bool("prompt", false, "Write ARCHSCOPE.md context prompt alongside the generated files")
 	fromPrompt := flag.String("from-prompt", "", "Path to an archscope context document; reconstruct the described file tree")
 	startDate := flag.String("start-date", "", "Generate a fake .git history starting from this date (format: 2025-05-01); only business days get commits")
+	endDate := flag.String("end-date", "", "End date for fake .git history (format: 2025-05-01); defaults to today")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -115,8 +116,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse start date early so we can fail fast before generating files.
-	var gitStart time.Time
+	// Parse start/end dates early so we can fail fast before generating files.
+	var gitStart, gitEnd time.Time
 	var doGit bool
 	if *startDate != "" {
 		var err error
@@ -126,6 +127,14 @@ func main() {
 			os.Exit(1)
 		}
 		doGit = true
+	}
+	if *endDate != "" {
+		var err error
+		gitEnd, err = parseStartDate(*endDate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: -end-date must be in YYYY-MM-DD format, got %q: %v\n", *endDate, err)
+			os.Exit(1)
+		}
 	}
 
 	// ── from-prompt mode ──────────────────────────────────────────────────────
@@ -145,12 +154,29 @@ func main() {
 		// section so that key functions are generated at the right depth.
 		funcLineHints := spec.LongestFuncMap()
 
+		// pkgGenerated shares a name-tracking map across all files in the same
+		// Go package directory. This prevents (a) two files declaring the same
+		// function or stub name, and (b) stubs being emitted more than once per
+		// package (since generateDomainFuncName won't re-pick a name already in
+		// the shared map).
+		pkgGenerated := make(map[string]map[string]bool)
+
 		var fileInfos []prompt.FileInfo
 		var filePaths []string
 		for _, fs := range spec.Files {
 			ext := extForFile(fs.Path, *lang)
 
-			state := generator.NewTargeted(fs.Lines, fs.Decls, names, rng)
+			var state *generator.State
+			if ext == "go" {
+				dir := filepath.Dir(filepath.FromSlash(fs.Path))
+				if pkgGenerated[dir] == nil {
+					pkgGenerated[dir] = make(map[string]bool)
+				}
+				state = generator.NewTargetedShared(fs.Lines, fs.Decls, pkgGenerated[dir], names, rng)
+			} else {
+				state = generator.NewTargeted(fs.Lines, fs.Decls, names, rng)
+			}
+
 			var program []ast.Statement
 			if ext == "go" {
 				program = state.GenerateGoProgramWithDecls(fs.Decls, funcLineHints)
@@ -239,6 +265,7 @@ func main() {
 			gcfg := gitgen.Config{
 				OutputDir:      outputDir,
 				StartDate:      gitStart,
+			EndDate:        gitEnd,
 				Contributors:   contributors,
 				FilePaths:      filePaths,
 				CommitMessages: commitMsgs,
@@ -336,6 +363,7 @@ func main() {
 		gcfg := gitgen.Config{
 			OutputDir:      outputDir,
 			StartDate:      gitStart,
+			EndDate:        gitEnd,
 			Contributors:   cfg.Contributors,
 			FilePaths:      filePaths,
 			CommitMessages: normalResult.CommitMessages,
