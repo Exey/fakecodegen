@@ -1,10 +1,41 @@
 package render
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/exey/fakecodegen/internal/ast"
 )
+
+var funcDeclRe = regexp.MustCompile(`^func\s+(\w+)\s*\(`)
+
+// ExtractFuncLines scans rendered Go source and returns a map of
+// function name → line count (from the func declaration to its closing brace).
+func ExtractFuncLines(source string) map[string]int {
+	result := make(map[string]int)
+	lines := strings.Split(source, "\n")
+	var cur string
+	var start int
+	depth := 0
+	for i, line := range lines {
+		if m := funcDeclRe.FindStringSubmatch(line); m != nil && depth == 0 {
+			cur = m[1]
+			start = i
+		}
+		for _, ch := range line {
+			if ch == '{' {
+				depth++
+			} else if ch == '}' {
+				depth--
+			}
+		}
+		if cur != "" && depth == 0 {
+			result[cur] = i - start + 1
+			cur = ""
+		}
+	}
+	return result
+}
 
 // Renderer renders a program to source code.
 type Renderer interface {

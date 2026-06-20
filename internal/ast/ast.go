@@ -111,21 +111,88 @@ type ForStmt struct {
 	Body  []Statement
 }
 
+// TypedParam is a function parameter with an explicit type.
+type TypedParam struct {
+	Name string
+	Type string // "int", "int64", "string", "float64", "bool"
+}
+
+// FuncDef is a function definition node.
+// If TypedParams is non-empty it overrides ParamNames for the rendered signature.
+// If ReturnType is set the renderer uses it instead of picking randomly.
 type FuncDef struct {
-	Name       string
-	ParamNames []string
-	Body       []Statement
+	Name        string
+	ParamNames  []string     // legacy all-int params
+	TypedParams []TypedParam // domain-aware typed params (overrides ParamNames when non-empty)
+	ReturnType  string       // explicit return type (renderer picks if empty)
+	Body        []Statement
 }
 
 type ReturnStmt struct{ Value Expression }
 type ExprStmt struct{ Expr Expression }
 type CommentStmt struct{ Text string }
 
-func (Assignment) isStatement()  {}
-func (IfStmt) isStatement()      {}
-func (WhileStmt) isStatement()   {}
-func (ForStmt) isStatement()     {}
-func (FuncDef) isStatement()     {}
-func (ReturnStmt) isStatement()  {}
-func (ExprStmt) isStatement()    {}
-func (CommentStmt) isStatement() {}
+// SwitchStmt is an integer switch statement.
+type SwitchStmt struct {
+	Tag     string       // variable name being switched on
+	Cases   []SwitchCase
+	Default []Statement
+}
+
+// SwitchCase is one arm of a SwitchStmt.
+type SwitchCase struct {
+	Value int64
+	Body  []Statement
+}
+
+// DeferStmt renders as `defer log.Println("text")`.
+type DeferStmt struct {
+	Text string
+}
+
+// HelperCallStmt renders as `result := helperName(arg1, arg2)`.
+// The helper function must be declared elsewhere in the package.
+type HelperCallStmt struct {
+	Name   string   // helper function name
+	Args   []string // int-typed variable names in scope
+	Result string   // new local variable for the return value
+}
+
+// StructDecl is a top-level struct type declaration.
+type StructDecl struct {
+	Name   string
+	Fields []StructField
+}
+
+// StructField is one field inside a StructDecl.
+type StructField struct {
+	Name string
+	Type string
+}
+
+// InterfaceDecl is a top-level interface type declaration.
+type InterfaceDecl struct {
+	Name    string
+	Methods []InterfaceMethod
+}
+
+// InterfaceMethod is one method signature inside an InterfaceDecl.
+type InterfaceMethod struct {
+	Name       string
+	ParamTypes []string
+	ReturnType string
+}
+
+func (Assignment) isStatement()      {}
+func (IfStmt) isStatement()          {}
+func (WhileStmt) isStatement()       {}
+func (ForStmt) isStatement()         {}
+func (FuncDef) isStatement()         {}
+func (ReturnStmt) isStatement()      {}
+func (ExprStmt) isStatement()        {}
+func (CommentStmt) isStatement()     {}
+func (SwitchStmt) isStatement()      {}
+func (DeferStmt) isStatement()       {}
+func (HelperCallStmt) isStatement()  {}
+func (StructDecl) isStatement()      {}
+func (InterfaceDecl) isStatement()   {}

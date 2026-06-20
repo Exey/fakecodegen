@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/exey/fakecodegen/internal/ast"
 	"github.com/exey/fakecodegen/internal/generator"
 	"github.com/exey/fakecodegen/internal/gitgen"
 	"github.com/exey/fakecodegen/internal/parser"
@@ -150,7 +151,12 @@ func main() {
 			ext := extForFile(fs.Path, *lang)
 
 			state := generator.NewTargeted(fs.Lines, fs.Decls, names, rng)
-			program := state.GenerateProgramWithDeclsAndHints(fs.Decls, funcLineHints)
+			var program []ast.Statement
+			if ext == "go" {
+				program = state.GenerateGoProgramWithDecls(fs.Decls, funcLineHints)
+			} else {
+				program = state.GenerateProgramWithDeclsAndHints(fs.Decls, funcLineHints)
+			}
 
 			source, err := render.RenderSourceFile(program, ext, fs.Path)
 			if err != nil {
@@ -169,11 +175,16 @@ func main() {
 			}
 			fmt.Println(outPath)
 
-			fileInfos = append(fileInfos, prompt.FileInfo{
-				Path:  fs.Path,
-				Lines: countLines(source),
-				Decls: generator.FunctionNames(program),
-			})
+			fi := prompt.FileInfo{
+				Path:       fs.Path,
+				Lines:      countLines(source),
+				Decls:      generator.FunctionNames(program),
+				TypedDecls: generator.AllDeclsByType(program),
+			}
+			if ext == "go" {
+				fi.FuncLines = render.ExtractFuncLines(source)
+			}
+			fileInfos = append(fileInfos, fi)
 			filePaths = append(filePaths, fs.Path)
 		}
 
@@ -190,6 +201,7 @@ func main() {
 			fmt.Println(readmePath)
 		}
 
+		var promptResult prompt.GenerateResult
 		if *promptFlag {
 			promptLang := spec.Platform
 			if *lang != "" {
@@ -202,9 +214,9 @@ func main() {
 				Contributors: spec.Contributors,
 				Rng:          rng,
 			}
-			doc := prompt.Generate(cfg)
+			promptResult = prompt.Generate(cfg)
 			promptPath := filepath.Join(outputDir, "ARCHSCOPE.md")
-			if err := os.WriteFile(promptPath, []byte(doc), 0o644); err != nil {
+			if err := os.WriteFile(promptPath, []byte(promptResult.Doc), 0o644); err != nil {
 				fmt.Fprintf(os.Stderr, "error writing prompt: %v\n", err)
 				os.Exit(1)
 			}
@@ -216,12 +228,22 @@ func main() {
 			if len(contributors) == 0 {
 				contributors = defaultContributors()
 			}
+			commitMsgs := spec.RecentCommitMessages
+			if len(commitMsgs) == 0 {
+				commitMsgs = promptResult.CommitMessages
+			}
+			tags := spec.Tags
+			if len(tags) == 0 {
+				tags = promptResult.Tags
+			}
 			gcfg := gitgen.Config{
-				OutputDir:    outputDir,
-				StartDate:    gitStart,
-				Contributors: contributors,
-				FilePaths:    filePaths,
-				Rng:          rng,
+				OutputDir:      outputDir,
+				StartDate:      gitStart,
+				Contributors:   contributors,
+				FilePaths:      filePaths,
+				CommitMessages: commitMsgs,
+				Tags:           tags,
+				Rng:            rng,
 			}
 			if err := gitgen.Generate(gcfg); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: git history generation failed: %v\n", err)
@@ -258,7 +280,12 @@ func main() {
 
 	for _, filename := range filenames {
 		state := generator.NewShared(5, sharedGenerated, names, rng)
-		program := state.GenerateProgram()
+		var program []ast.Statement
+		if ext == "go" {
+			program = state.GenerateGoProgram()
+		} else {
+			program = state.GenerateProgram()
+		}
 
 		source, err := render.RenderSourceFile(program, ext, filename)
 		if err != nil {
@@ -273,24 +300,32 @@ func main() {
 		}
 		fmt.Println(outPath)
 
-		fileInfos = append(fileInfos, prompt.FileInfo{
-			Path:  filename,
-			Lines: countLines(source),
-			Decls: generator.FunctionNames(program),
-		})
+		fi := prompt.FileInfo{
+			Path:       filename,
+			Lines:      countLines(source),
+			Decls:      generator.FunctionNames(program),
+			TypedDecls: generator.AllDeclsByType(program),
+		}
+		if ext == "go" {
+			fi.FuncLines = render.ExtractFuncLines(source)
+		}
+		fileInfos = append(fileInfos, fi)
 		filePaths = append(filePaths, filename)
 	}
 
+	cfg := prompt.Config{
+		Lang:       ext,
+		FolderName: filepath.Base(outputDir),
+		Files:      fileInfos,
+		Rng:        rng,
+	}
+	cfg.Contributors = prompt.BuildContributors(cfg)
+	// Always generate result so gitgen can reuse commit messages and tags
+	// even when -prompt is not set.
+	normalResult := prompt.Generate(cfg)
 	if *promptFlag {
-		cfg := prompt.Config{
-			Lang:       ext,
-			FolderName: filepath.Base(outputDir),
-			Files:      fileInfos,
-			Rng:        rng,
-		}
-		doc := prompt.Generate(cfg)
 		promptPath := filepath.Join(outputDir, "ARCHSCOPE.md")
-		if err := os.WriteFile(promptPath, []byte(doc), 0o644); err != nil {
+		if err := os.WriteFile(promptPath, []byte(normalResult.Doc), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing prompt: %v\n", err)
 			os.Exit(1)
 		}
@@ -299,11 +334,13 @@ func main() {
 
 	if doGit {
 		gcfg := gitgen.Config{
-			OutputDir:    outputDir,
-			StartDate:    gitStart,
-			Contributors: defaultContributors(),
-			FilePaths:    filePaths,
-			Rng:          rng,
+			OutputDir:      outputDir,
+			StartDate:      gitStart,
+			Contributors:   cfg.Contributors,
+			FilePaths:      filePaths,
+			CommitMessages: normalResult.CommitMessages,
+			Tags:           normalResult.Tags,
+			Rng:            rng,
 		}
 		if err := gitgen.Generate(gcfg); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: git history generation failed: %v\n", err)

@@ -13,9 +13,10 @@ import (
 
 // FileSpec describes one file entry from an archscope prompt.
 type FileSpec struct {
-	Path  string   // relative path as written in the prompt
-	Lines int      // target line count
-	Decls []string // declaration/function names listed after "—"
+	Path       string              // relative path as written in the prompt
+	Lines      int                 // target line count
+	Decls      []string            // flat declaration/function names (legacy flat format)
+	TypedDecls map[string][]string // decls grouped by kind: "func", "struct", "interface"
 }
 
 // Contributor describes one author from the ### Contributors table.
@@ -34,15 +35,17 @@ type LongestFunc struct {
 
 // PromptSpec is the parsed result of an archscope context document.
 type PromptSpec struct {
-	Platform      string        // e.g. "Rust", "Go", "Python"
-	Module        string        // module/folder name (first module from ## Overview)
-	TechStack     []string      // tools listed under ## Tech Stack
-	TotalFiles    int           // from ## Overview "Files: N"
-	TotalLines    int           // from ## Overview "Lines: N"
-	Files         []FileSpec
-	Contributors  []Contributor  // from ### Contributors table
-	LongestFuncs  []LongestFunc  // from ## Longest Functions table
-	InboundRoutes []string       // from ## Inbound Traffic bullet list
+	Platform             string        // e.g. "Rust", "Go", "Python"
+	Module               string        // module/folder name (first module from ## Overview)
+	TechStack            []string      // tools listed under ## Tech Stack
+	TotalFiles           int           // from ## Overview "Files: N"
+	TotalLines           int           // from ## Overview "Lines: N"
+	Files                []FileSpec
+	Contributors         []Contributor  // from ### Contributors table
+	LongestFuncs         []LongestFunc  // from ## Longest Functions table
+	InboundRoutes        []string       // from ## Inbound Traffic bullet list
+	RecentCommitMessages []string       // from **Recent commit messages:** list
+	Tags                 []string       // from Tags: line in ### Releases
 }
 
 // Ext returns the file extension that best represents the platform.
@@ -87,7 +90,16 @@ func (p *PromptSpec) LongestFuncMap() map[string]int {
 	return m
 }
 
-var keyFileRe = regexp.MustCompile("^-\\s+`([^`]+)`\\s+\\((\\d+)\\s+lines?\\)(?:\\s+—\\s+(.+))?$")
+// keyFileRe matches the header line of a Key Files entry:
+//   - `path/to/file.go` (123 lines)
+//   - `path/to/file.go` (123 lines) — name1, name2   (legacy flat format)
+var keyFileRe = regexp.MustCompile(`^-\s+` + "`" + `([^` + "`" + `]+)` + "`" + `\s+\((\d+)\s+lines?\)(?:\s+—\s+(.+))?$`)
+
+// typedDeclLineRe matches an indented typed-decl line:
+//
+//	  - struct: Foo, Bar
+//	  - func: Baz
+var typedDeclLineRe = regexp.MustCompile(`^\s+-\s+(func|struct|interface|type|class|method|field):\s+(.+)$`)
 
 var contributorRowRe = regexp.MustCompile(`^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|`)
 
@@ -115,8 +127,21 @@ func Parse(content string) (*PromptSpec, error) {
 		secContributors
 		secLongestFuncs
 		secInboundTraffic
+		secReleases
+		secRecentMsgs
 	)
 	cur := secNone
+
+	// currentFile holds the file entry being built when we are in secKeyFiles.
+	// Typed decl lines that follow a key-file header are appended into it.
+	var currentFile *FileSpec
+
+	flushCurrentFile := func() {
+		if currentFile != nil {
+			spec.Files = append(spec.Files, *currentFile)
+			currentFile = nil
+		}
+	}
 
 	sc := bufio.NewScanner(strings.NewReader(content))
 	for sc.Scan() {
@@ -125,6 +150,7 @@ func Parse(content string) (*PromptSpec, error) {
 
 		// ## section headers (level 2)
 		if strings.HasPrefix(line, "## ") {
+			flushCurrentFile()
 			heading := strings.TrimSpace(strings.TrimPrefix(line, "## "))
 			switch strings.ToLower(heading) {
 			case "overview":
@@ -137,6 +163,8 @@ func Parse(content string) (*PromptSpec, error) {
 				cur = secLongestFuncs
 			case "inbound traffic":
 				cur = secInboundTraffic
+			case "git stats":
+				cur = secNone
 			default:
 				cur = secNone
 			}
@@ -145,12 +173,22 @@ func Parse(content string) (*PromptSpec, error) {
 
 		// ### subsection headers (level 3)
 		if strings.HasPrefix(line, "### ") {
+			flushCurrentFile()
 			heading := strings.TrimSpace(strings.TrimPrefix(line, "### "))
-			if strings.EqualFold(heading, "contributors") {
+			switch strings.ToLower(heading) {
+			case "contributors":
 				cur = secContributors
-			} else {
+			case "releases":
+				cur = secReleases
+			default:
 				cur = secNone
 			}
+			continue
+		}
+
+		// **Recent commit messages:** (bold line, not a ### header)
+		if strings.HasPrefix(strings.TrimSpace(line), "**Recent commit messages:**") {
+			cur = secRecentMsgs
 			continue
 		}
 
@@ -200,22 +238,52 @@ func Parse(content string) (*PromptSpec, error) {
 			}
 
 		case secKeyFiles:
-			if m := keyFileRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			trimmed := strings.TrimSpace(line)
+
+			// Try typed-decl continuation line first ("  - struct: Foo, Bar").
+			if currentFile != nil {
+				if m := typedDeclLineRe.FindStringSubmatch(line); m != nil {
+					kind := m[1]
+					// Normalise aliases.
+					switch kind {
+					case "type", "class":
+						kind = "struct"
+					case "method":
+						kind = "func"
+					case "field":
+						kind = "struct"
+					}
+					if currentFile.TypedDecls == nil {
+						currentFile.TypedDecls = make(map[string][]string)
+					}
+					for _, d := range strings.Split(m[2], ",") {
+						d = strings.TrimSpace(d)
+						if d != "" {
+							currentFile.TypedDecls[kind] = append(currentFile.TypedDecls[kind], d)
+						}
+					}
+					continue
+				}
+			}
+
+			// Try to match a new key-file header line.
+			if m := keyFileRe.FindStringSubmatch(trimmed); m != nil {
+				flushCurrentFile()
 				lineCount, _ := strconv.Atoi(m[2])
-				var decls []string
+				fs := &FileSpec{
+					Path:  m[1],
+					Lines: lineCount,
+				}
 				if m[3] != "" {
+					// Legacy flat format: decls after "—".
 					for _, d := range strings.Split(m[3], ",") {
 						d = strings.TrimSpace(d)
 						if d != "" {
-							decls = append(decls, d)
+							fs.Decls = append(fs.Decls, d)
 						}
 					}
 				}
-				spec.Files = append(spec.Files, FileSpec{
-					Path:  m[1],
-					Lines: lineCount,
-					Decls: decls,
-				})
+				currentFile = fs
 			}
 
 		case secContributors:
@@ -255,13 +323,47 @@ func Parse(content string) (*PromptSpec, error) {
 					spec.InboundRoutes = append(spec.InboundRoutes, route)
 				}
 			}
+
+		case secRecentMsgs:
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "- ") {
+				msg := strings.TrimPrefix(trimmed, "- ")
+				if msg != "" {
+					spec.RecentCommitMessages = append(spec.RecentCommitMessages, msg)
+				}
+			}
+
+		case secReleases:
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "Tags:") {
+				raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "Tags:"))
+				for _, t := range strings.Split(raw, "·") {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						spec.Tags = append(spec.Tags, t)
+					}
+				}
+			}
 		}
 	}
+	// Flush the last in-progress file entry.
+	flushCurrentFile()
+
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read error: %w", err)
 	}
 	if len(spec.Files) == 0 {
 		return nil, fmt.Errorf("no file entries found — is this a valid archscope prompt with a '## Key Files' section?")
 	}
+
+	// For files that have TypedDecls, also populate the flat Decls list from
+	// the "func" bucket so that the rest of the pipeline (which uses Decls as
+	// function names) continues to work unchanged.
+	for i := range spec.Files {
+		if len(spec.Files[i].TypedDecls) > 0 && len(spec.Files[i].Decls) == 0 {
+			spec.Files[i].Decls = spec.Files[i].TypedDecls["func"]
+		}
+	}
+
 	return spec, nil
 }

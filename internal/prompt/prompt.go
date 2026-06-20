@@ -14,9 +14,18 @@ import (
 
 // FileInfo describes one generated file.
 type FileInfo struct {
-	Path  string   // relative path inside the output folder
-	Lines int      // total line count
-	Decls []string // top-level declaration names (functions)
+	Path       string              // relative path inside the output folder
+	Lines      int                 // total line count
+	Decls      []string            // top-level declaration names (legacy, funcs only)
+	TypedDecls map[string][]string // decls by kind: "func", "struct", "interface"
+	FuncLines  map[string]int      // function name → rendered line count (Go only)
+}
+
+// GenerateResult is the output of Generate.
+type GenerateResult struct {
+	Doc            string
+	CommitMessages []string
+	Tags           []string
 }
 
 // Config holds the parameters for prompt generation.
@@ -64,6 +73,35 @@ var staleTaskNames = []string{
 
 var peakDays = []string{"Mon", "Tue", "Wed", "Thu", "Fri"}
 
+var branchingModels = []struct {
+	name       string
+	confidence int
+	note       string
+}{
+	{"GitHub Flow", 80, "Simple feature-branch workflow — no integration/release/hotfix branches"},
+	{"Git Flow", 65, "Uses feature, release, and hotfix branch conventions alongside main/develop"},
+	{"Trunk-Based", 72, "Short-lived branches merged directly to trunk with frequent releases"},
+	{"Scaled Trunk", 58, "Trunk-based with feature flags — branches live < 2 days on average"},
+}
+
+var fakeCommitMessages = []string{
+	"fix: resolve nil pointer dereference in request handler",
+	"feat: add pagination support to list endpoints",
+	"refactor: extract validation logic into separate package",
+	"chore: update dependencies to latest versions",
+	"fix: correct off-by-one error in range calculation",
+	"feat: implement retry mechanism for external calls",
+	"docs: update API documentation for new endpoints",
+	"test: add integration tests for auth service",
+	"perf: optimise database query with proper indexing",
+	"fix: handle edge case when user session expires",
+	"refactor: simplify error handling in middleware",
+	"feat: add metrics collection for request duration",
+	"chore: remove unused imports and dead code",
+	"fix: correct timezone handling in date comparison",
+	"feat: add graceful shutdown with context cancellation",
+}
+
 func langLabel(lang string) string {
 	switch lang {
 	case "go":
@@ -84,9 +122,11 @@ func pickN(rng *rand.Rand, items []string, n int) []string {
 	return picked[:n]
 }
 
-// buildContributors returns the contributor list to use: either the ones
-// parsed from the source prompt (Contributors in cfg) or freshly generated.
-func buildContributors(cfg Config) []parser.Contributor {
+// BuildContributors returns the contributor list to use: either the ones
+// already in cfg.Contributors or a freshly generated set.  Call this before
+// Generate() if you need to share the same contributor list with other
+// subsystems (e.g. gitgen).
+func BuildContributors(cfg Config) []parser.Contributor {
 	if len(cfg.Contributors) > 0 {
 		return cfg.Contributors
 	}
@@ -112,8 +152,40 @@ func buildContributors(cfg Config) []parser.Contributor {
 	return contributors
 }
 
-// Generate returns the archscope-format prompt document as a string.
-func Generate(cfg Config) string {
+// renderTypedDecls emits the indented "  - kind: Name1, Name2" lines for
+// a Key Files entry.  For files with no TypedDecls we fall back to the flat
+// plain-name list (backward compatible with non-Go renderers).
+func renderTypedDecls(f FileInfo, limit int) string {
+	if len(f.TypedDecls) == 0 {
+		// Legacy flat list.
+		decls := f.Decls
+		if len(decls) > limit {
+			decls = decls[:limit]
+		}
+		if len(decls) == 0 {
+			return ""
+		}
+		return " — " + strings.Join(decls, ", ")
+	}
+
+	// Emit one indented line per kind in canonical order.
+	var sb strings.Builder
+	for _, kind := range []string{"interface", "struct", "func"} {
+		names := f.TypedDecls[kind]
+		if len(names) == 0 {
+			continue
+		}
+		if len(names) > limit {
+			names = names[:limit]
+		}
+		fmt.Fprintf(&sb, "\n  - %s: %s", kind, strings.Join(names, ", "))
+	}
+	return sb.String()
+}
+
+// Generate returns the archscope-format prompt document plus metadata that
+// callers (e.g. gitgen) can reuse for consistency.
+func Generate(cfg Config) GenerateResult {
 	label := langLabel(cfg.Lang)
 
 	// Aggregate stats
@@ -121,7 +193,13 @@ func Generate(cfg Config) string {
 	totalDecls := 0
 	for _, f := range cfg.Files {
 		totalLines += f.Lines
-		totalDecls += len(f.Decls)
+		if len(f.TypedDecls) > 0 {
+			for _, names := range f.TypedDecls {
+				totalDecls += len(names)
+			}
+		} else {
+			totalDecls += len(f.Decls)
+		}
 	}
 
 	// Sort files by line count descending for Key Files section
@@ -147,7 +225,7 @@ func Generate(cfg Config) string {
 	tech := pickN(cfg.Rng, techPool, techCount)
 	sort.Strings(tech)
 
-	contributors := buildContributors(cfg)
+	contributors := BuildContributors(cfg)
 
 	// Total commits = sum of contributor commits
 	totalCommits := 0
@@ -193,6 +271,37 @@ func Generate(cfg Config) string {
 		staleBranchCount = branchTotal - 1
 	}
 
+	// Commit type distribution
+	commitTypes := map[string]int{}
+	remaining := typedCommits
+	prefixOrder := pickN(cfg.Rng, commitPrefixes, len(commitPrefixes))
+	for i, p := range prefixOrder {
+		if remaining <= 0 {
+			break
+		}
+		var n int
+		if i == len(prefixOrder)-1 {
+			n = remaining
+		} else {
+			n = cfg.Rng.IntN(remaining/2+1) + 1
+		}
+		commitTypes[p] += n
+		remaining -= n
+	}
+
+	// Recent commit messages (pick 5-8 random ones)
+	msgCount := cfg.Rng.IntN(4) + 5
+	recentMsgs := pickN(cfg.Rng, fakeCommitMessages, msgCount)
+
+	// Branching model
+	bm := branchingModels[cfg.Rng.IntN(len(branchingModels))]
+
+	// Author names for inline Top authors line
+	authorNames := make([]string, len(contributors))
+	for i, c := range contributors {
+		authorNames[i] = c.Name
+	}
+
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# %s — Architecture Context\n\n", label)
@@ -209,25 +318,86 @@ func Generate(cfg Config) string {
 	b.WriteString(strings.Join(tech, " · "))
 	b.WriteString("\n\n")
 
+	// ── Key Files ────────────────────────────────────────────────────────────
 	b.WriteString("## Key Files\n\n")
 	for _, f := range keyFiles {
-		declStr := ""
-		if len(f.Decls) > 0 {
-			decls := f.Decls
-			if len(decls) > 12 {
-				decls = decls[:12]
-			}
-			declStr = " — " + strings.Join(decls, ", ")
-		}
+		declSuffix := renderTypedDecls(f, 12)
 		fmt.Fprintf(&b, "- `%s` (%d lines)%s\n",
-			filepath.ToSlash(f.Path), f.Lines, declStr)
+			filepath.ToSlash(f.Path), f.Lines, declSuffix)
 	}
 	b.WriteByte('\n')
 
+	// ── Longest Functions ────────────────────────────────────────────────────
+	type funcEntry struct {
+		name string
+		file string
+		lines int
+	}
+	var funcEntries []funcEntry
+	for _, f := range cfg.Files {
+		for fn, lc := range f.FuncLines {
+			funcEntries = append(funcEntries, funcEntry{name: fn, file: filepath.ToSlash(f.Path), lines: lc})
+		}
+	}
+	if len(funcEntries) > 0 {
+		sort.Slice(funcEntries, func(i, j int) bool {
+			return funcEntries[i].lines > funcEntries[j].lines
+		})
+		if len(funcEntries) > 15 {
+			funcEntries = funcEntries[:15]
+		}
+		b.WriteString("## Longest Functions\n\n")
+		b.WriteString("| Function | Lines | File |\n")
+		b.WriteString("|----------|------:|------|\n")
+		for _, fe := range funcEntries {
+			fmt.Fprintf(&b, "| %s | %d | %s |\n", fe.name, fe.lines, fe.file)
+		}
+		b.WriteByte('\n')
+	}
+
+	// ── Git Stats ─────────────────────────────────────────────────────────────
 	b.WriteString("## Git Stats\n\n")
 	fmt.Fprintf(&b, "- **Total commits:** %d  |  **Typed:** %d/%d\n",
 		totalCommits, typedCommits, totalCommits)
-	b.WriteString("\n")
+	fmt.Fprintf(&b, "- **Latest release:** %s\n", latestTag)
+	fmt.Fprintf(&b, "- **Top authors:** %s\n", strings.Join(authorNames, ", "))
+	b.WriteString("- **Hot files (by change count):**\n")
+	for _, hf := range hotFiles {
+		fmt.Fprintf(&b, "  - %s (%d changes)\n", filepath.ToSlash(hf.path), hf.changes)
+	}
+	b.WriteByte('\n')
+
+	// Commit Types
+	b.WriteString("### Commit Types\n\n")
+	// Sort by count descending.
+	type ctEntry struct{ prefix string; count int }
+	ctList := make([]ctEntry, 0, len(commitTypes))
+	for p, n := range commitTypes {
+		ctList = append(ctList, ctEntry{p, n})
+	}
+	sort.Slice(ctList, func(i, j int) bool {
+		if ctList[i].count != ctList[j].count {
+			return ctList[i].count > ctList[j].count
+		}
+		return ctList[i].prefix < ctList[j].prefix
+	})
+	for _, ct := range ctList {
+		fmt.Fprintf(&b, "- %s: %d\n", ct.prefix, ct.count)
+	}
+	b.WriteByte('\n')
+
+	// Recent commit messages
+	b.WriteString("**Recent commit messages:**\n\n")
+	for _, msg := range recentMsgs {
+		fmt.Fprintf(&b, "- %s\n", msg)
+	}
+	b.WriteByte('\n')
+
+	// Branching Model
+	b.WriteString("### Branching Model\n\n")
+	fmt.Fprintf(&b, "**%s** · %d%% confidence · primary branch: `main`\n\n",
+		bm.name, bm.confidence)
+	fmt.Fprintf(&b, "- %s\n\n", bm.note)
 
 	// Contributors table
 	b.WriteString("### Contributors\n\n")
@@ -248,10 +418,11 @@ func Generate(cfg Config) string {
 	b.WriteByte('\n')
 
 	// Releases
+	tagSlice := buildTagSlice(tagCount, latestMajor, latestMinor, latestPatch, cfg.Rng)
 	b.WriteString("### Releases\n\n")
 	fmt.Fprintf(&b, "**%d tags** · %d semver · latest `%s`\n\n", tagCount, semverCount, latestTag)
 	b.WriteString("Tags: ")
-	b.WriteString(generateTagList(tagCount, latestMajor, latestMinor, latestPatch, cfg.Rng))
+	b.WriteString(strings.Join(tagSlice, " · "))
 	b.WriteString("\n\n")
 
 	// Branches
@@ -270,15 +441,18 @@ func Generate(cfg Config) string {
 		b.WriteByte('\n')
 	}
 
-	return b.String()
+	return GenerateResult{
+		Doc:            b.String(),
+		CommitMessages: recentMsgs,
+		Tags:           tagSlice,
+	}
 }
 
-// generateTagList produces a space-separated · list of version tags.
-func generateTagList(total, major, minor, patch int, rng *rand.Rand) string {
+// buildTagSlice generates the ordered list of version tag strings.
+func buildTagSlice(total, major, minor, patch int, rng *rand.Rand) []string {
 	type ver struct{ major, minor, patch int }
 	var versions []ver
 
-	// Work backwards from the latest tag
 	m, n, p := major, minor, patch
 	for i := 0; i < total && (m > 0 || n > 0 || p > 0); i++ {
 		versions = append(versions, ver{m, n, p})
@@ -293,22 +467,25 @@ func generateTagList(total, major, minor, patch int, rng *rand.Rand) string {
 			p = rng.IntN(10) + 5
 		}
 	}
-	// Reverse so oldest first
 	for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
 		versions[i], versions[j] = versions[j], versions[i]
 	}
 
-	var tags []string
+	tags := make([]string, 0, len(versions))
 	for _, v := range versions {
 		base := fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
-		// Mix v-prefixed and bare tags
 		if rng.IntN(2) == 0 {
 			tags = append(tags, "v"+base)
 		} else {
 			tags = append(tags, base)
 		}
 	}
-	return strings.Join(tags, " · ")
+	return tags
+}
+
+// generateTagList produces a space-separated · list of version tags.
+func generateTagList(total, major, minor, patch int, rng *rand.Rand) string {
+	return strings.Join(buildTagSlice(total, major, minor, patch, rng), " · ")
 }
 
 func fmtNum(n int) string {

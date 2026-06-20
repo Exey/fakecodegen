@@ -15,11 +15,13 @@ import (
 
 // Config describes how to build the fake git history.
 type Config struct {
-	OutputDir    string               // path to the directory that already contains generated files
-	StartDate    time.Time            // first commit date (must be a business day or earlier)
-	Contributors []parser.Contributor // authors to use; must be non-empty
-	FilePaths    []string             // relative file paths inside OutputDir (used in commit messages)
-	Rng          *rand.Rand
+	OutputDir      string               // path to the directory that already contains generated files
+	StartDate      time.Time            // first commit date (must be a business day or earlier)
+	Contributors   []parser.Contributor // authors to use; must be non-empty
+	FilePaths      []string             // relative file paths inside OutputDir (used in commit messages)
+	CommitMessages []string             // realistic commit messages to mix into history
+	Tags           []string             // version tags to distribute across the commit history
+	Rng            *rand.Rand
 }
 
 var commitTemplates = []string{
@@ -102,7 +104,7 @@ func Generate(cfg Config) error {
 		author = authorPool[cfg.Rng.IntN(len(authorPool))]
 		authorFlag = fmt.Sprintf("%s <%s>", author, nameToEmail(author))
 		dateStr = fmtGitDate(day, cfg.Rng)
-		msg := randomCommitMsg(cfg.FilePaths, cfg.Rng)
+		msg := randomCommitMsg(cfg.FilePaths, cfg.CommitMessages, cfg.Rng)
 
 		env = []string{
 			"GIT_AUTHOR_DATE=" + dateStr,
@@ -117,6 +119,35 @@ func Generate(cfg Config) error {
 		}
 	}
 
+	if len(cfg.Tags) > 0 {
+		if err := placeTags(dir, cfg.Tags); err != nil {
+			// Non-fatal: tags are cosmetic
+			_ = err
+		}
+	}
+
+	return nil
+}
+
+// placeTags distributes version tags across the commit history.
+func placeTags(dir string, tags []string) error {
+	out, err := exec.Command("git", "-C", dir, "log", "--reverse", "--format=%H").Output()
+	if err != nil {
+		return err
+	}
+	hashes := strings.Fields(string(out))
+	if len(hashes) == 0 {
+		return nil
+	}
+	step := max(1, len(hashes)/(len(tags)+1))
+	for i, tag := range tags {
+		idx := (i + 1) * step
+		if idx >= len(hashes) {
+			idx = len(hashes) - 1
+		}
+		// Ignore errors for duplicate or invalid tag names
+		_ = run(dir, "git", "tag", tag, hashes[idx])
+	}
 	return nil
 }
 
@@ -156,10 +187,7 @@ func buildAuthorPool(contributors []parser.Contributor) []string {
 	const maxPool = 500
 	var pool []string
 	for _, c := range contributors {
-		slots := c.Commits * maxPool / total
-		if slots < 1 {
-			slots = 1
-		}
+		slots := max(1, c.Commits*maxPool/total)
 		for range slots {
 			pool = append(pool, c.Name)
 		}
@@ -200,9 +228,13 @@ func fmtGitDate(day time.Time, rng *rand.Rand) string {
 	return t.Format("2006-01-02T15:04:05 +0000")
 }
 
-// randomCommitMsg picks a commit message, using a file basename or generic
-// subject as the format argument.
-func randomCommitMsg(filePaths []string, rng *rand.Rand) string {
+// randomCommitMsg picks a commit message. When commitMessages is non-empty,
+// 40% of the time it returns one of those directly (realistic messages from
+// the ARCHSCOPE prompt); otherwise it generates a templated message.
+func randomCommitMsg(filePaths, commitMessages []string, rng *rand.Rand) string {
+	if len(commitMessages) > 0 && rng.IntN(10) < 4 {
+		return commitMessages[rng.IntN(len(commitMessages))]
+	}
 	tmpl := commitTemplates[rng.IntN(len(commitTemplates))]
 	var subject string
 	if len(filePaths) > 0 {
