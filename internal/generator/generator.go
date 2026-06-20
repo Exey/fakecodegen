@@ -30,6 +30,17 @@ var sloppyComments = []string{
 	"do NOT refactor",
 	"here be dragons",
 	"TODO: revisit before next release",
+	"TODO: remove before production",
+	"TODO: handle this properly",
+	"TODO: add validation here",
+	"TODO: write unit tests",
+	"TODO: optimize this later",
+	"TODO: check edge cases",
+	"FIXME: breaks under concurrent load",
+	"FIXME: memory leak suspected",
+	"FIXME: this is wrong for negative values",
+	"FIXME: race condition possible here",
+	"FIXME: fails on empty input",
 	"off by one? probably fine",
 	"not sure this handles all edge cases",
 	"ask alice before changing this",
@@ -571,24 +582,171 @@ func (s *State) genScopedBlock(depth int, inFunction bool) []ast.Statement {
 	return block
 }
 
+// genBlock generates a sequence of statement groups where every declared
+// variable is consumed within the same group (no orphan declarations).
 func (s *State) genBlock(depth int, inFunction bool) []ast.Statement {
-	count := s.rng.IntN(5) + 1
-	block := make([]ast.Statement, 0, count)
+	count := s.rng.IntN(3) + 1
+	var block []ast.Statement
 	for range count {
-		stmt := s.GenStatement(depth, inFunction)
-		block = append(block, stmt)
-		// Stop after a return so no unreachable statements follow it.
-		if _, ok := stmt.(ast.ReturnStmt); ok {
-			break
+		group := s.genStatementGroup(depth, inFunction)
+		block = append(block, group...)
+		if len(block) > 0 {
+			if _, ok := block[len(block)-1].(ast.ReturnStmt); ok {
+				return block
+			}
 		}
 	}
 	return block
 }
 
+// genStatementGroup returns 1-2 statements that collectively consume every
+// variable they declare.  This guarantees zero orphan declarations and
+// therefore zero "_ = varName" cleanup in the rendered output.
+func (s *State) genStatementGroup(depth int, inFunction bool) []ast.Statement {
+	if depth >= s.maxDepth {
+		if inFunction {
+			if v := s.randVar(); v != "" {
+				return []ast.Statement{ast.ReturnStmt{Value: ast.VarExpr{Name: v}}}
+			}
+			return []ast.Statement{ast.ReturnStmt{Value: ast.IntLit{Value: s.randSmallInt()}}}
+		}
+		return nil
+	}
+
+	ops := []ast.Condition{ast.GreaterThan, ast.LessThan, ast.NotEquals, ast.GreaterThanOrEqual}
+	randOp := func() ast.Condition { return ops[s.rng.IntN(len(ops))] }
+
+	switch s.rng.IntN(8) {
+	case 0:
+		// plain if-else (no new outer-scope declarations)
+		else_ := []ast.Statement{}
+		if s.rng.Float64() < 0.5 {
+			else_ = s.genScopedBlock(depth+1, inFunction)
+		}
+		return []ast.Statement{ast.IfStmt{
+			Cond: s.genBoolExpr(depth + 1),
+			Then: s.genScopedBlock(depth+1, inFunction),
+			Else: else_,
+		}}
+
+	case 1:
+		// declare var → use immediately in if-guard condition
+		// Generate value BEFORE inserting var into scope to prevent self-reference.
+		varName := s.generateName()
+		val := s.GenIntExpr(depth + 1)
+		s.insertVar(varName)
+		return []ast.Statement{
+			ast.Assignment{Name: varName, Value: val, IsDecl: true},
+			ast.IfStmt{
+				Cond: ast.CondExpr{
+					Left:  ast.VarExpr{Name: varName},
+					Op:    randOp(),
+					Right: ast.IntLit{Value: s.randSmallInt()},
+				},
+				Then: s.genScopedBlock(depth+1, inFunction),
+			},
+		}
+
+	case 2:
+		// declare var → return it directly (functions only)
+		if inFunction {
+			varName := s.generateName()
+			val := s.GenIntExpr(depth + 1)
+			s.insertVar(varName)
+			return []ast.Statement{
+				ast.Assignment{Name: varName, Value: val, IsDecl: true},
+				ast.ReturnStmt{Value: ast.VarExpr{Name: varName}},
+			}
+		}
+		fallthrough
+
+	case 3:
+		// while loop (condition uses in-scope vars or literals)
+		return []ast.Statement{ast.WhileStmt{
+			Cond: s.genBoolExpr(depth + 1),
+			Body: s.genScopedBlock(depth+1, inFunction),
+		}}
+
+	case 4:
+		// for-range with blank identifier (no named loop variable)
+		return []ast.Statement{ast.ForStmt{
+			Var:   "_",
+			Range: s.GenIntExpr(depth + 1),
+			Body:  s.genScopedBlock(depth+1, inFunction),
+		}}
+
+	case 5:
+		// declare var → use as switch tag (functions only)
+		if inFunction {
+			varName := s.generateName()
+			val := s.GenIntExpr(depth + 1)
+			s.insertVar(varName)
+			sw := s.genSwitchOnVar(varName, depth, inFunction)
+			return []ast.Statement{
+				ast.Assignment{Name: varName, Value: val, IsDecl: true},
+				sw,
+			}
+		}
+		fallthrough
+
+	case 6:
+		// return (function) or if without else (package level)
+		if inFunction {
+			return []ast.Statement{ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)}}
+		}
+		return []ast.Statement{ast.IfStmt{
+			Cond: s.genBoolExpr(depth + 1),
+			Then: s.genScopedBlock(depth+1, inFunction),
+		}}
+
+	default:
+		if s.rng.Float64() < 0.04 {
+			return []ast.Statement{ast.CommentStmt{Text: s.randComment()}}
+		}
+		return []ast.Statement{ast.IfStmt{
+			Cond: s.genBoolExpr(depth + 1),
+			Then: s.genScopedBlock(depth+1, inFunction),
+		}}
+	}
+}
+
+// genSwitchOnVar generates a switch statement that uses tag as its expression,
+// guaranteeing the variable is consumed.
+func (s *State) genSwitchOnVar(tag string, depth int, inFunction bool) ast.SwitchStmt {
+	caseCount := s.rng.IntN(2) + 1
+	cases := make([]ast.SwitchCase, caseCount)
+	usedVals := make(map[int64]bool)
+	for i := range cases {
+		var v int64
+		for {
+			v = int64(s.rng.IntN(10))
+			if !usedVals[v] {
+				break
+			}
+		}
+		usedVals[v] = true
+		cases[i] = ast.SwitchCase{
+			Value: v,
+			Body:  s.genScopedBlock(depth+1, inFunction),
+		}
+	}
+	def := s.genScopedBlock(depth+1, inFunction)
+	if inFunction {
+		if len(def) == 0 {
+			def = []ast.Statement{ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)}}
+		} else if _, ok := def[len(def)-1].(ast.ReturnStmt); !ok {
+			def = append(def, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
+		}
+	}
+	return ast.SwitchStmt{Tag: tag, Cases: cases, Default: def}
+}
+
 func (s *State) genFunctionBody(depth int) []ast.Statement {
 	s.pushScope()
 	body := s.genBlock(depth, true)
-	if _, ok := body[len(body)-1].(ast.ReturnStmt); !ok {
+	if len(body) == 0 {
+		body = append(body, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
+	} else if _, ok := body[len(body)-1].(ast.ReturnStmt); !ok {
 		body = append(body, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
 	}
 	s.popScope()
@@ -608,7 +766,9 @@ func (s *State) genFunctionWithParams(depth int, name string) ast.FuncDef {
 	s.pushScope()
 	params := s.genParams()
 	body := s.genBlock(depth, true)
-	if _, ok := body[len(body)-1].(ast.ReturnStmt); !ok {
+	if len(body) == 0 {
+		body = append(body, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
+	} else if _, ok := body[len(body)-1].(ast.ReturnStmt); !ok {
 		body = append(body, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
 	}
 	s.popScope()
@@ -710,6 +870,8 @@ func (s *State) genHelperCallStmt(d domain) *ast.HelperCallStmt {
 var goReturnTypes = []string{"int64", "string", "bool", "error"}
 
 // genDomainFunction generates a domain-aware top-level function.
+// Every local variable is declared and immediately consumed in the same
+// statement group — no orphan declarations, no _ = cleanup required.
 func (s *State) genDomainFunction(depth int, name string) ast.FuncDef {
 	d := s.pickDomain()
 	retType := goReturnTypes[s.rng.IntN(len(goReturnTypes))]
@@ -722,59 +884,61 @@ func (s *State) genDomainFunction(depth int, name string) ast.FuncDef {
 
 	var body []ast.Statement
 
-	// 40% chance: open with a defer statement.
+	// Optional defer.
 	if s.rng.Float64() < 0.4 {
 		body = append(body, s.genDeferStmt(d))
 	}
 
-	// ~4% chance: a plausible comment.
+	// Optional comment.
 	if s.rng.Float64() < 0.04 {
 		body = append(body, ast.CommentStmt{Text: s.randComment()})
 	}
 
-	// 2-4 domain-named local variable declarations with compound expressions.
-	localCount := s.rng.IntN(3) + 2
+	// Declare 1-2 domain vars; each is immediately used as an if-guard condition.
+	// This is the "early-return validation" pattern common in real code.
+	ops := []ast.Condition{ast.GreaterThan, ast.LessThan, ast.NotEquals, ast.GreaterThanOrEqual}
+	localCount := s.rng.IntN(2) + 1
 	for range localCount {
-		// Generate value first (so the new var can't reference itself).
+		// Generate value first so the new variable can't appear in its own initializer.
 		val := s.GenIntExpr(depth + 1)
 		varName := s.generateDomainVar(d)
 		body = append(body, ast.Assignment{Name: varName, Value: val, IsDecl: true})
-	}
-
-	// Combine two vars into an "interim" result for pseudo-meaningful computation.
-	if vars := s.allVars(); len(vars) >= 2 {
-		left := ast.VarExpr{Name: vars[s.rng.IntN(len(vars))]}
-		right := ast.VarExpr{Name: vars[s.rng.IntN(len(vars))]}
-		interimVal := ast.ArithExpr{Left: left, Op: ast.Add, Right: right}
-		interimName := s.generateVar()
-		body = append(body, ast.Assignment{Name: interimName, Value: interimVal, IsDecl: true})
-	}
-
-	// 50% chance: generate a helper call.
-	if s.rng.Float64() < 0.5 {
-		if hc := s.genHelperCallStmt(d); hc != nil {
-			body = append(body, *hc)
-		}
-	}
-
-	// 40% chance: generate a switch statement.
-	if s.rng.Float64() < 0.4 {
-		if sw := s.genSwitchStmt(depth+1, true); sw != nil {
-			body = append(body, *sw)
-		}
-	}
-
-	// 30% chance: generate a nested if/else block.
-	if s.rng.Float64() < 0.3 {
+		// Consume the variable immediately in a guard.
+		op := ops[s.rng.IntN(len(ops))]
 		body = append(body, ast.IfStmt{
-			Cond: s.genBoolExpr(depth + 1),
-			Then: s.genScopedBlock(depth+1, true),
-			Else: s.genScopedBlock(depth+1, true),
+			Cond: ast.CondExpr{
+				Left:  ast.VarExpr{Name: varName},
+				Op:    op,
+				Right: ast.IntLit{Value: s.randSmallInt()},
+			},
+			Then: []ast.Statement{ast.ReturnStmt{Value: ast.IntLit{Value: 0}}},
 		})
 	}
 
-	// Final return always present — handles any non-returning switch case arms.
-	body = append(body, ast.ReturnStmt{Value: s.GenIntExpr(depth + 1)})
+	// Optional helper call; result is always used in the final return.
+	var helperResult string
+	if s.rng.Float64() < 0.5 {
+		if hc := s.genHelperCallStmt(d); hc != nil {
+			body = append(body, *hc)
+			helperResult = hc.Result
+		}
+	}
+
+	// Optional switch on an in-scope variable.
+	if s.rng.Float64() < 0.4 {
+		if tag := s.randVar(); tag != "" {
+			body = append(body, s.genSwitchOnVar(tag, depth+1, true))
+		}
+	}
+
+	// Final return — use helperResult when available, otherwise an in-scope var.
+	if helperResult != "" {
+		body = append(body, ast.ReturnStmt{Value: ast.VarExpr{Name: helperResult}})
+	} else if v := s.randVar(); v != "" {
+		body = append(body, ast.ReturnStmt{Value: ast.VarExpr{Name: v}})
+	} else {
+		body = append(body, ast.ReturnStmt{Value: ast.IntLit{Value: s.randSmallInt()}})
+	}
 
 	s.popScope()
 	s.closures = prevClosures
@@ -891,9 +1055,10 @@ func (s *State) GenerateProgram() []ast.Statement {
 		program = append(program, s.genFunctionWithParams(0, name))
 	}
 
-	stmtCount := s.rng.IntN(18) + 8
-	for range stmtCount {
-		program = append(program, s.GenStatement(0, false))
+	for range s.rng.IntN(18) + 8 {
+		for _, stmt := range s.genStatementGroup(0, false) {
+			program = append(program, stmt)
+		}
 	}
 
 	s.popScope()
@@ -931,10 +1096,11 @@ func (s *State) GenerateGoProgram() []ast.Statement {
 		program = append(program, s.genStub(stubName, argCount))
 	}
 
-	// Init-scope statements.
-	stmtCount := s.rng.IntN(10) + 5
-	for range stmtCount {
-		program = append(program, s.GenStatement(0, false))
+	// Init-scope statements — keep this short so declared functions stay longest.
+	for range s.rng.IntN(3) + 1 {
+		for _, stmt := range s.genStatementGroup(0, false) {
+			program = append(program, stmt)
+		}
 	}
 
 	s.popScope()
@@ -1042,7 +1208,9 @@ func (s *State) GenerateProgramWithDeclsAndHints(declNames []string, funcLineHin
 	}
 
 	for range s.rng.IntN(10) + 5 {
-		program = append(program, s.GenStatement(0, false))
+		for _, stmt := range s.genStatementGroup(0, false) {
+			program = append(program, stmt)
+		}
 	}
 
 	s.popScope()
@@ -1095,8 +1263,11 @@ func (s *State) GenerateGoProgramWithDecls(declNames []string, funcLineHints map
 		}
 	}
 
-	for range s.rng.IntN(10) + 5 {
-		program = append(program, s.GenStatement(0, false))
+	// Init-scope statements — keep this short so declared functions stay longest.
+	for range s.rng.IntN(3) + 1 {
+		for _, stmt := range s.genStatementGroup(0, false) {
+			program = append(program, stmt)
+		}
 	}
 
 	s.popScope()

@@ -5,6 +5,7 @@ package gitgen
 import (
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,10 @@ func Generate(cfg Config) error {
 	// Weighted author pool: more commits → higher chance to be picked
 	authorPool := buildAuthorPool(cfg.Contributors)
 
+	// Build an author schedule that guarantees every contributor appears at least
+	// once when we have enough days.  Remaining days use random weighted picks.
+	authorSchedule := buildAuthorSchedule(cfg.Contributors, authorPool, len(days)-1, cfg.Rng)
+
 	// First commit: stage all generated files
 	if err := run(dir, "git", "add", "-A"); err != nil {
 		return fmt.Errorf("git add: %w", err)
@@ -99,12 +104,40 @@ func Generate(cfg Config) error {
 		return fmt.Errorf("initial commit: %w", err)
 	}
 
-	// Subsequent business days: empty commits with realistic messages
-	for _, day := range days[1:] {
-		author = authorPool[cfg.Rng.IntN(len(authorPool))]
+	// Subsequent business days: touch 1-3 source files and update the CHANGES
+	// log so every author is credited with real file modifications (not just
+	// empty commits).  A trailing newline appended to a source file is valid
+	// in all supported languages and invisible to compilers.
+	changelogPath := filepath.Join(dir, "CHANGES")
+	for i, day := range days[1:] {
+		author = authorSchedule[i]
 		authorFlag = fmt.Sprintf("%s <%s>", author, nameToEmail(author))
 		dateStr = fmtGitDate(day, cfg.Rng)
 		msg := randomCommitMsg(cfg.FilePaths, cfg.CommitMessages, cfg.Rng)
+
+		// Append a trailing newline to 1-3 randomly chosen source files.
+		if len(cfg.FilePaths) > 0 {
+			touchCount := cfg.Rng.IntN(3) + 1
+			for range touchCount {
+				rel := cfg.FilePaths[cfg.Rng.IntN(len(cfg.FilePaths))]
+				full := filepath.Join(dir, filepath.FromSlash(rel))
+				f, err := os.OpenFile(full, os.O_APPEND|os.O_WRONLY, 0o644)
+				if err == nil {
+					_, _ = f.WriteString("\n")
+					f.Close()
+					_ = run(dir, "git", "add", filepath.FromSlash(rel))
+				}
+			}
+		}
+
+		// Update the CHANGES log.
+		entry := fmt.Sprintf("%s %s: %s\n", day.Format("2006-01-02"), author, msg)
+		f, err := os.OpenFile(changelogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = f.WriteString(entry)
+			f.Close()
+			_ = run(dir, "git", "add", "CHANGES")
+		}
 
 		env = []string{
 			"GIT_AUTHOR_DATE=" + dateStr,
@@ -166,6 +199,50 @@ func businessDays(start, end time.Time) []time.Time {
 
 func truncateToDay(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+// buildAuthorSchedule returns an author name for each of `count` subsequent
+// days.  Every contributor gets at least 1 slot (when count >= contributors),
+// then remaining slots are filled from the weighted pool.
+func buildAuthorSchedule(contributors []parser.Contributor, pool []string, count int, rng *rand.Rand) []string {
+	schedule := make([]string, count)
+
+	// Collect unique contributor names (preserve order by commits).
+	names := make([]string, 0, len(contributors))
+	seen := make(map[string]bool)
+	for _, c := range contributors {
+		if !seen[c.Name] {
+			names = append(names, c.Name)
+			seen[c.Name] = true
+		}
+	}
+
+	// Shuffle to avoid the same ordering each run while still guaranteeing coverage.
+	shuffled := append([]string(nil), names...)
+	rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+
+	// Evenly space guaranteed slots across the available days.
+	if count >= len(shuffled) {
+		step := count / len(shuffled)
+		if step < 1 {
+			step = 1
+		}
+		for i, name := range shuffled {
+			idx := i * step
+			if idx >= count {
+				idx = count - 1
+			}
+			schedule[idx] = name
+		}
+	}
+
+	// Fill remaining empty slots with weighted-random picks.
+	for i := range schedule {
+		if schedule[i] == "" {
+			schedule[i] = pool[rng.IntN(len(pool))]
+		}
+	}
+	return schedule
 }
 
 // buildAuthorPool creates a slice where each author appears proportionally to

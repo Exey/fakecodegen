@@ -55,6 +55,14 @@ func deriveGoPackage(filePath string) string {
 	if pkg == "" || (pkg[0] >= '0' && pkg[0] <= '9') {
 		return "generated"
 	}
+	// Reject Go keywords and builtin identifiers as package names.
+	switch pkg {
+	case "break", "case", "chan", "const", "continue", "default", "defer",
+		"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+		"interface", "map", "package", "range", "return", "select", "struct",
+		"switch", "type", "var":
+		return "generated"
+	}
 	return pkg
 }
 
@@ -152,16 +160,14 @@ func (r *GoRenderer) typedReturnExpr(val ast.Expression) string {
 			return "false"
 		}
 	case "error":
-		// 50/50: nil or fmt.Errorf
-		if rand.IntN(2) == 0 {
-			return "nil"
-		}
-		r.imports["fmt"] = true
+		// When we have a variable expression, always use it to avoid
+		// "declared and not used" errors (50/50 nil would orphan the var).
 		switch v := val.(type) {
 		case ast.VarExpr:
+			r.imports["fmt"] = true
 			return fmt.Sprintf("fmt.Errorf(\"operation failed for %%d\", %s)", v.Name)
 		default:
-			return `fmt.Errorf("operation failed")`
+			return "nil"
 		}
 	default: // "any" — any expression is valid
 		return r.renderExpr(val)
@@ -169,59 +175,8 @@ func (r *GoRenderer) typedReturnExpr(val ast.Expression) string {
 }
 
 func (r *GoRenderer) renderBlock(block []ast.Statement, out *strings.Builder) {
-	// Collect names declared at this block level (either := assignments,
-	// inner closures, or helper call results) so we can emit "_ = name" to
-	// satisfy Go's "declared and not used" rule.
-	// FuncDef names at the package level are handled by Go itself and must NOT
-	// be included here.
-	var blockDecls []string
 	for _, stmt := range block {
-		switch s := stmt.(type) {
-		case ast.Assignment:
-			if s.IsDecl {
-				blockDecls = append(blockDecls, s.Name)
-			}
-		case ast.FuncDef:
-			// Closures rendered as `name := func() T {...}` are local variables
-			// and must be marked used.  This branch is only reached when we are
-			// already inside a function (r.inFunction == true).
-			if r.inFunction {
-				blockDecls = append(blockDecls, s.Name)
-			}
-		case ast.HelperCallStmt:
-			blockDecls = append(blockDecls, s.Result)
-		}
-	}
-
-	emitDecls := func() {
-		for _, name := range blockDecls {
-			r.w.Line(out, fmt.Sprintf("_ = %s", name))
-		}
-	}
-
-	if len(block) == 0 {
-		return
-	}
-
-	// Emit "_ = name" cleanup BEFORE the last statement when it terminates
-	// control flow (return or switch-with-default), so that:
-	//  - the return remains the final statement (Go's missing-return check)
-	//  - no cleanup appears after an unreachable point
-	// For all other blocks emit cleanup AFTER all statements.
-	lastStmt := block[len(block)-1]
-	_, lastIsReturn := lastStmt.(ast.ReturnStmt)
-	_, lastIsSwitch := lastStmt.(ast.SwitchStmt)
-	emitBeforeLast := lastIsReturn || lastIsSwitch
-
-	for i, stmt := range block {
-		if emitBeforeLast && i == len(block)-1 {
-			emitDecls()
-		}
 		r.renderStmt(stmt, out)
-	}
-
-	if !emitBeforeLast {
-		emitDecls()
 	}
 }
 
@@ -235,9 +190,8 @@ func (r *GoRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 			// New local variable.
 			r.w.Line(out, fmt.Sprintf("%s := %s", s.Name, r.renderExpr(s.Value)))
 		} else {
-			// Reassignment: use _ = expr to avoid type-mismatch between the
-			// variable's inferred type and the new value's type.
-			r.w.Line(out, fmt.Sprintf("_ = %s", r.renderExpr(s.Value)))
+			// Reassignment to an existing variable (all vars are int-typed).
+			r.w.Line(out, fmt.Sprintf("%s = %s", s.Name, r.renderExpr(s.Value)))
 		}
 
 	case ast.IfStmt:
@@ -261,14 +215,14 @@ func (r *GoRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Line(out, "}")
 
 	case ast.ForStmt:
-		// Range is always an integer expression (ensured by generator).
-		// Wrap in int() to handle VarExpr that might be any type at runtime.
 		rangeStr := r.renderIntRange(s.Range)
-		r.w.Line(out, fmt.Sprintf("for %s := range %s {", s.Var, rangeStr))
+		if s.Var == "" || s.Var == "_" {
+			// No loop variable needed: use Go 1.22+ bare range syntax.
+			r.w.Line(out, fmt.Sprintf("for range %s {", rangeStr))
+		} else {
+			r.w.Line(out, fmt.Sprintf("for %s := range %s {", s.Var, rangeStr))
+		}
 		r.w.Inc()
-		// Always mark the loop variable as used so that body statements which
-		// happen not to reference it don't trigger "declared and not used".
-		r.w.Line(out, fmt.Sprintf("_ = %s", s.Var))
 		r.renderBlock(s.Body, out)
 		r.w.Dec()
 		r.w.Line(out, "}")
@@ -296,14 +250,7 @@ func (r *GoRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 			paramStr := r.renderFuncParams(s)
 			r.w.Line(out, fmt.Sprintf("func %s(%s) %s {", s.Name, paramStr, retType))
 			r.w.Inc()
-			// Mark non-int typed params as used at top of function.
-			if len(s.TypedParams) > 0 {
-				for _, tp := range s.TypedParams {
-					if tp.Type != "int" {
-						r.w.Line(out, fmt.Sprintf("_ = %s", tp.Name))
-					}
-				}
-			}
+			// Note: function parameters do not need to be "used" in Go.
 			r.renderBlock(s.Body, out)
 			r.w.Dec()
 			r.w.Line(out, "}")
@@ -317,12 +264,11 @@ func (r *GoRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Line(out, fmt.Sprintf("return %s", r.typedReturnExpr(s.Value)))
 
 	case ast.ExprStmt:
-		// Prefer calling functions as statements; otherwise use _ = expr
 		if fc, ok := s.Expr.(ast.FuncCallExpr); ok {
 			r.w.Line(out, fmt.Sprintf("%s()", fc.Name))
-		} else {
-			r.w.Line(out, fmt.Sprintf("_ = %s", r.renderExpr(s.Expr)))
 		}
+		// Non-call expressions are skipped: the generator only produces
+		// ExprStmt with function calls for Go output.
 
 	case ast.CommentStmt:
 		r.w.Line(out, fmt.Sprintf("// %s", s.Text))
