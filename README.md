@@ -16,10 +16,22 @@ Swap in any archscope `.md` from your own project to reconstruct its structure.
 
 ### Add a realistic `.git` history
 
-Pass `--start-date` to create a real git repository with a commit for every business day between the given date and today. Commit authors and weights are taken from the `### Contributors` table in the archscope prompt:
+Pass `-start-date` to create a real git repository with commits on every business day between the given date and today. Commit authors and weights are taken from the `### Contributors` table in the archscope prompt:
 
 ```bash
-fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo --start-date 2024-01-15
+fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo -start-date 2024-01-15
+```
+
+Use `-commits-per-day` to control activity density (default `1`). Set it to `10` to mimic a busy team:
+
+```bash
+fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo -start-date 2024-01-15 -commits-per-day 10
+```
+
+Use `-end-date` to cap the history at a specific date instead of today:
+
+```bash
+fakecodegen -from-prompt prompt-Go.md -folder ./fake-repo -start-date 2024-01-15 -end-date 2024-06-01 -commits-per-day 5
 ```
 
 ```text
@@ -101,7 +113,9 @@ fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -prompt
 | `-n` | `1` | Number of files to generate (normal mode only). |
 | `-prompt` | `false` | Write `ARCHSCOPE.md` in the output folder describing the generated files. |
 | `-from-prompt` | — | Path to an archscope context document. Reconstructs the described file tree and writes `README.md`. |
-| `--start-date` | — | Generate a `.git` repository with one commit per business day from this date to today (format: `2025-01-15`). Contributor names and commit weights are taken from the `### Contributors` table in the prompt. |
+| `-start-date` | — | Generate a `.git` repository with commits from this date to today (format: `2025-01-15`). Contributor names and weights come from the `### Contributors` table in the prompt. |
+| `-end-date` | today | End date for the generated git history (format: `2025-06-01`). Defaults to today. |
+| `-commits-per-day` | `1` | Average number of commits per business day. Use `10` for a busy-team look. A small ±1 jitter is applied automatically. |
 
 ## Supported renderers
 

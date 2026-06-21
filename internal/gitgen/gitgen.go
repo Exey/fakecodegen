@@ -20,6 +20,7 @@ type Config struct {
 	OutputDir      string               // path to the directory that already contains generated files
 	StartDate      time.Time            // first commit date (must be a business day or earlier)
 	EndDate        time.Time            // last commit date (zero = today)
+	CommitsPerDay  int                  // average commits per business day (0 or 1 = one per day)
 	Contributors   []parser.Contributor // authors to use; must be non-empty
 	FilePaths      []string             // relative file paths inside OutputDir (used in commit messages)
 	CommitMessages []string             // realistic commit messages to mix into history
@@ -86,12 +87,18 @@ func Generate(cfg Config) error {
 	// Weighted author pool: more commits → higher chance to be picked
 	authorPool := buildAuthorPool(cfg.Contributors)
 
-	// Pre-generate per-day commit counts (5–15 per business day) and build an
-	// author schedule that guarantees every contributor appears at least once.
+	// Pre-generate per-day commit counts and build an author schedule that
+	// guarantees every contributor appears at least once.
+	cpd := cfg.CommitsPerDay
+	if cpd < 1 {
+		cpd = 1
+	}
 	perDay := make([]int, len(days))
 	totalSubsequent := 0
 	for i := range days {
-		perDay[i] = cfg.Rng.IntN(11) + 5
+		// Add ±1 jitter so the history looks organic; minimum 1.
+		jitter := cfg.Rng.IntN(3) - 1 // -1, 0, or +1
+		perDay[i] = max(1, cpd+jitter)
 		if i == 0 {
 			totalSubsequent += perDay[i] - 1 // first commit on day 0 is the initial
 		} else {

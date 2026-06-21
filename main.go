@@ -82,10 +82,10 @@ func usage() {
 
 Usage:
   Generate random files:
-    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01] [-end-date 2025-06-01]
+    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01] [-end-date 2025-06-01] [-commits-per-day 10]
 
   Reconstruct a repo from an archscope prompt:
-    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01] [-end-date 2025-06-01]
+    fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01] [-end-date 2025-06-01] [-commits-per-day 10]
 
 Flags:
 `)
@@ -104,6 +104,7 @@ func main() {
 	fromPrompt := flag.String("from-prompt", "", "Path to an archscope context document; reconstruct the described file tree")
 	startDate := flag.String("start-date", "", "Generate a fake .git history starting from this date (format: 2025-05-01); only business days get commits")
 	endDate := flag.String("end-date", "", "End date for fake .git history (format: 2025-05-01); defaults to today")
+	commitsPerDay := flag.Int("commits-per-day", 1, "Average number of commits per business day in the generated git history")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -266,6 +267,7 @@ func main() {
 				OutputDir:      outputDir,
 				StartDate:      gitStart,
 			EndDate:        gitEnd,
+			CommitsPerDay:  *commitsPerDay,
 				Contributors:   contributors,
 				FilePaths:      filePaths,
 				CommitMessages: commitMsgs,
@@ -364,6 +366,7 @@ func main() {
 			OutputDir:      outputDir,
 			StartDate:      gitStart,
 			EndDate:        gitEnd,
+			CommitsPerDay:  *commitsPerDay,
 			Contributors:   cfg.Contributors,
 			FilePaths:      filePaths,
 			CommitMessages: normalResult.CommitMessages,
