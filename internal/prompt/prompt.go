@@ -53,13 +53,27 @@ var pyTechStack = []string{
 	"NumPy", "pandas", "Prometheus", "OpenTelemetry", "Kafka", "boto3",
 }
 
+var swiftTechStack = []string{
+	"SwiftUI", "Combine", "Foundation", "Dispatch", "CoreData", "URLSession",
+	"Vapor", "Hummingbird", "SwiftNIO", "GRDB", "Realm", "Alamofire",
+	"Kingfisher", "Quick", "Nimble", "XCTest", "SwiftLint", "SwiftPM",
+	"AsyncAwait", "Actor", "Codable", "CoreML", "Metal", "CloudKit",
+}
+
+var kotlinTechStack = []string{
+	"Kotlinx Coroutines", "Kotlinx Serialization", "Ktor", "Exposed",
+	"JetBrains Exposed", "Room", "Hilt", "Dagger", "Koin", "Gradle",
+	"Kotlinx DateTime", "Arrow", "Kotest", "MockK", "Detekt",
+	"Spring Boot", "Micronaut", "Jetpack Compose", "Retrofit", "OkHttp",
+}
+
 var goFakeAuthors = []string{
 	"Alice Chen", "Bob Kim", "Carlos Ruiz", "Diana Lee", "Ethan Park",
 	"Fiona Wang", "Grace Liu", "Henry Zhang", "Iris Nakamura", "Jake Brown",
 }
 
 var pyFakeAuthors = []string{
-	"Anna Kovac", "Ben Torres", "Clara Singh", "David Müller", "Elena Petrov",
+	"Anna Kovac", "Ben Torres", "Clara Singh", "David Müller", "Elena Petrova",
 	"Felix Okafor", "Gina Yamamoto", "Hassan Ali", "Isla Campbell", "Jan Nowak",
 }
 
@@ -329,8 +343,8 @@ func Generate(cfg Config) GenerateResult {
 
 	// ── Longest Functions ────────────────────────────────────────────────────
 	type funcEntry struct {
-		name string
-		file string
+		name  string
+		file  string
 		lines int
 	}
 	var funcEntries []funcEntry
@@ -370,7 +384,10 @@ func Generate(cfg Config) GenerateResult {
 	// Commit Types
 	b.WriteString("### Commit Types\n\n")
 	// Sort by count descending.
-	type ctEntry struct{ prefix string; count int }
+	type ctEntry struct {
+		prefix string
+		count  int
+	}
 	ctList := make([]ctEntry, 0, len(commitTypes))
 	for p, n := range commitTypes {
 		ctList = append(ctList, ctEntry{p, n})

@@ -126,6 +126,8 @@ fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -prompt
 | `.rs` | `fn` + brace blocks with `let mut` bindings |
 | `.js` | `function` + `var`/`let`/`const` assignments |
 | `.ts` | `function(): Type` + typed `let`/`const` assignments |
+| `.kt` | `fun(): Type` + typed `val`/`var` assignments |
+| `.swift` | `func(): Type` + typed `let`/`var` assignments |
 | other | Falls back to the Go renderer |
 
 ## How it works

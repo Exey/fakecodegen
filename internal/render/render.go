@@ -61,8 +61,8 @@ func (w *IndentWriter) Line(out *strings.Builder, line string) {
 }
 
 func (w *IndentWriter) Blank(out *strings.Builder) { out.WriteByte('\n') }
-func (w *IndentWriter) Inc()                        { w.indent++ }
-func (w *IndentWriter) Dec()                        { w.indent-- }
+func (w *IndentWriter) Inc()                       { w.indent++ }
+func (w *IndentWriter) Dec()                       { w.indent-- }
 
 // RenderSourceFile dispatches to the right renderer by extension.
 // filePath is the relative path of the output file and is used by the Go
@@ -84,6 +84,12 @@ func RenderSourceFile(program []ast.Statement, ext string, filePath string) (str
 		return r.RenderProgram(program), nil
 	case "ts":
 		r := NewTypeScriptRenderer()
+		return r.RenderProgram(program), nil
+	case "swift":
+		r := NewSwiftRenderer()
+		return r.RenderProgram(program), nil
+	case "kt":
+		r := NewKotlinRenderer()
 		return r.RenderProgram(program), nil
 	default:
 		// Unknown extension: fall back to Go-like brace syntax.

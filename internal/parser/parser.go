@@ -35,17 +35,17 @@ type LongestFunc struct {
 
 // PromptSpec is the parsed result of an archscope context document.
 type PromptSpec struct {
-	Platform             string        // e.g. "Rust", "Go", "Python"
-	Module               string        // module/folder name (first module from ## Overview)
-	TechStack            []string      // tools listed under ## Tech Stack
-	TotalFiles           int           // from ## Overview "Files: N"
-	TotalLines           int           // from ## Overview "Lines: N"
+	Platform             string   // e.g. "Rust", "Go", "Python"
+	Module               string   // module/folder name (first module from ## Overview)
+	TechStack            []string // tools listed under ## Tech Stack
+	TotalFiles           int      // from ## Overview "Files: N"
+	TotalLines           int      // from ## Overview "Lines: N"
 	Files                []FileSpec
-	Contributors         []Contributor  // from ### Contributors table
-	LongestFuncs         []LongestFunc  // from ## Longest Functions table
-	InboundRoutes        []string       // from ## Inbound Traffic bullet list
-	RecentCommitMessages []string       // from **Recent commit messages:** list
-	Tags                 []string       // from Tags: line in ### Releases
+	Contributors         []Contributor // from ### Contributors table
+	LongestFuncs         []LongestFunc // from ## Longest Functions table
+	InboundRoutes        []string      // from ## Inbound Traffic bullet list
+	RecentCommitMessages []string      // from **Recent commit messages:** list
+	Tags                 []string      // from Tags: line in ### Releases
 }
 
 // Ext returns the file extension that best represents the platform.
@@ -61,6 +61,10 @@ func (p *PromptSpec) Ext() string {
 		return "ts"
 	case "javascript":
 		return "js"
+	case "swift":
+		return "swift"
+	case "kotlin":
+		return "kt"
 	case "c++", "cpp":
 		return "cpp"
 	default:
@@ -97,8 +101,8 @@ var keyFileRe = regexp.MustCompile(`^-\s+` + "`" + `([^` + "`" + `]+)` + "`" + `
 
 // typedDeclLineRe matches an indented typed-decl line:
 //
-//	  - struct: Foo, Bar
-//	  - func: Baz
+//   - struct: Foo, Bar
+//   - func: Baz
 var typedDeclLineRe = regexp.MustCompile(`^\s+-\s+(func|struct|interface|type|class|method|field):\s+(.+)$`)
 
 var contributorRowRe = regexp.MustCompile(`^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|`)
