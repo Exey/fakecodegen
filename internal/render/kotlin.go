@@ -12,6 +12,29 @@ var kotlinTypes = []string{"Int", "Long", "Double", "String", "Boolean"}
 var kotlinReturnTypes = []string{"Int", "Double", "String", "Boolean", "Unit"}
 var kotlinVarKeywords = []string{"val", "var"}
 
+var kotlinTypeRemap = map[string]string{
+	"int":             "Int",
+	"int64":           "Long",
+	"uint32":          "UInt",
+	"string":          "String",
+	"bool":            "Boolean",
+	"float64":         "Double",
+	"[]byte":          "ByteArray",
+	"time.Time":       "Long",
+	"error":           "Exception",
+	"any":             "Any",
+	"context.Context": "Any",
+	"(string, error)": "Pair<String, Exception?>",
+	"(int, error)":    "Pair<Int, Exception?>",
+}
+
+func kotlinMapType(t string) string {
+	if v, ok := kotlinTypeRemap[t]; ok {
+		return v
+	}
+	return t
+}
+
 // KotlinRenderer renders AST to Kotlin source.
 type KotlinRenderer struct {
 	w IndentWriter
@@ -105,16 +128,25 @@ func (r *KotlinRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Dec()
 		r.w.Line(out, "}")
 	case ast.FuncDef:
-		ret := randKotlinReturn()
+		retType := randKotlinReturn()
+		if s.ReturnType != "" {
+			retType = kotlinMapType(s.ReturnType)
+		}
 		var params []string
-		for _, p := range s.ParamNames {
-			params = append(params, fmt.Sprintf("%s: %s", p, randKotlinType()))
+		if len(s.TypedParams) > 0 {
+			for _, tp := range s.TypedParams {
+				params = append(params, fmt.Sprintf("%s: %s", tp.Name, kotlinMapType(tp.Type)))
+			}
+		} else {
+			for _, p := range s.ParamNames {
+				params = append(params, fmt.Sprintf("%s: %s", p, randKotlinType()))
+			}
 		}
 		paramStr := strings.Join(params, ", ")
-		if ret == "Unit" {
+		if retType == "Unit" || retType == "" {
 			r.w.Line(out, fmt.Sprintf("fun %s(%s) {", s.Name, paramStr))
 		} else {
-			r.w.Line(out, fmt.Sprintf("fun %s(%s): %s {", s.Name, paramStr, ret))
+			r.w.Line(out, fmt.Sprintf("fun %s(%s): %s {", s.Name, paramStr, retType))
 		}
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
@@ -124,19 +156,91 @@ func (r *KotlinRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 	case ast.ReturnStmt:
 		r.w.Line(out, fmt.Sprintf("return %s", r.renderExpr(s.Value)))
 	case ast.ExprStmt:
-		r.w.Line(out, fmt.Sprintf("%s", r.renderExpr(s.Expr)))
+		r.w.Line(out, r.renderExpr(s.Expr))
 	case ast.CommentStmt:
 		r.w.Line(out, fmt.Sprintf("// %s", s.Text))
+	case ast.SwitchStmt:
+		r.w.Line(out, fmt.Sprintf("when (%s) {", s.Tag))
+		r.w.Inc()
+		for _, c := range s.Cases {
+			r.w.Line(out, fmt.Sprintf("%d -> {", c.Value))
+			r.w.Inc()
+			r.renderBlock(c.Body, out)
+			r.w.Dec()
+			r.w.Line(out, "}")
+		}
+		if len(s.Default) > 0 {
+			r.w.Line(out, "else -> {")
+			r.w.Inc()
+			r.renderBlock(s.Default, out)
+			r.w.Dec()
+			r.w.Line(out, "}")
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+	case ast.DeferStmt:
+		r.w.Line(out, fmt.Sprintf("Runtime.getRuntime().addShutdownHook(Thread { println(%q) })", s.Text))
+	case ast.HelperCallStmt:
+		args := strings.Join(s.Args, ", ")
+		r.w.Line(out, fmt.Sprintf("val %s = %s(%s)", s.Result, s.Name, args))
+	case ast.StructDecl:
+		var fields []string
+		for _, f := range s.Fields {
+			fields = append(fields, fmt.Sprintf("var %s: %s", lowerFirst(f.Name), kotlinMapType(f.Type)))
+		}
+		r.w.Line(out, fmt.Sprintf("data class %s(%s)", s.Name, strings.Join(fields, ", ")))
+		r.w.Blank(out)
+	case ast.InterfaceDecl:
+		r.w.Line(out, fmt.Sprintf("interface %s {", s.Name))
+		r.w.Inc()
+		for _, m := range s.Methods {
+			var params []string
+			for i, pt := range m.ParamTypes {
+				params = append(params, fmt.Sprintf("arg%d: %s", i, kotlinMapType(pt)))
+			}
+			retType := kotlinMapType(m.ReturnType)
+			if retType == "Unit" || retType == "" {
+				r.w.Line(out, fmt.Sprintf("fun %s(%s)", lowerFirst(m.Name), strings.Join(params, ", ")))
+			} else {
+				r.w.Line(out, fmt.Sprintf("fun %s(%s): %s", lowerFirst(m.Name), strings.Join(params, ", "), retType))
+			}
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+		r.w.Blank(out)
 	}
 }
 
 // RenderProgram renders a full Kotlin source file.
 func (r *KotlinRenderer) RenderProgram(program []ast.Statement) string {
 	var out strings.Builder
+
+	var topDecls []ast.Statement
+	var setupStmts []ast.Statement
 	for _, stmt := range program {
+		switch stmt.(type) {
+		case ast.FuncDef, ast.StructDecl, ast.InterfaceDecl:
+			topDecls = append(topDecls, stmt)
+		default:
+			setupStmts = append(setupStmts, stmt)
+		}
+	}
+
+	for _, stmt := range topDecls {
 		r.renderStmt(stmt, &out)
 		out.WriteByte('\n')
 	}
+
+	if len(setupStmts) > 0 {
+		out.WriteString("fun setup() {\n")
+		r.w.Inc()
+		for _, stmt := range setupStmts {
+			r.renderStmt(stmt, &out)
+		}
+		r.w.Dec()
+		out.WriteString("}\n")
+	}
+
 	return out.String()
 }
 

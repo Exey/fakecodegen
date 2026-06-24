@@ -11,6 +11,44 @@ import (
 var rustTypes = []string{"i32", "i64", "u32", "u64", "f64", "f32", "isize", "usize"}
 var rustReturnTypes = []string{"i32", "i64", "f64", "bool", "String", "()"}
 
+var rustTypeRemap = map[string]string{
+	"int":             "i32",
+	"int64":           "i64",
+	"uint32":          "u32",
+	"string":          "String",
+	"bool":            "bool",
+	"float64":         "f64",
+	"[]byte":          "Vec<u8>",
+	"time.Time":       "u64",
+	"error":           "Result<(), String>",
+	"any":             "Box<dyn std::any::Any>",
+	"context.Context": "i32",
+	"(string, error)": "(String, Result<(), String>)",
+	"(int, error)":    "(i64, Result<(), String>)",
+}
+
+func rustMapType(t string) string {
+	if v, ok := rustTypeRemap[t]; ok {
+		return v
+	}
+	return t
+}
+
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r - 'A' + 'a')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // RustRenderer renders AST to Rust source.
 type RustRenderer struct {
 	w IndentWriter
@@ -99,13 +137,26 @@ func (r *RustRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Dec()
 		r.w.Line(out, "}")
 	case ast.FuncDef:
-		ret := randRustReturn()
+		retType := randRustReturn()
+		if s.ReturnType != "" {
+			retType = rustMapType(s.ReturnType)
+		}
 		var params []string
-		for _, p := range s.ParamNames {
-			params = append(params, fmt.Sprintf("%s: %s", p, randRustType()))
+		if len(s.TypedParams) > 0 {
+			for _, tp := range s.TypedParams {
+				params = append(params, fmt.Sprintf("%s: %s", tp.Name, rustMapType(tp.Type)))
+			}
+		} else {
+			for _, p := range s.ParamNames {
+				params = append(params, fmt.Sprintf("%s: %s", p, randRustType()))
+			}
 		}
 		paramStr := strings.Join(params, ", ")
-		r.w.Line(out, fmt.Sprintf("fn %s(%s) -> %s {", s.Name, paramStr, ret))
+		if retType == "()" {
+			r.w.Line(out, fmt.Sprintf("fn %s(%s) {", s.Name, paramStr))
+		} else {
+			r.w.Line(out, fmt.Sprintf("fn %s(%s) -> %s {", s.Name, paramStr, retType))
+		}
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
 		r.w.Dec()
@@ -117,17 +168,93 @@ func (r *RustRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Line(out, fmt.Sprintf("%s;", r.renderExpr(s.Expr)))
 	case ast.CommentStmt:
 		r.w.Line(out, fmt.Sprintf("// %s", s.Text))
+	case ast.SwitchStmt:
+		r.w.Line(out, fmt.Sprintf("match %s {", s.Tag))
+		r.w.Inc()
+		for _, c := range s.Cases {
+			r.w.Line(out, fmt.Sprintf("%d => {", c.Value))
+			r.w.Inc()
+			r.renderBlock(c.Body, out)
+			r.w.Dec()
+			r.w.Line(out, "}")
+		}
+		if len(s.Default) > 0 {
+			r.w.Line(out, "_ => {")
+			r.w.Inc()
+			r.renderBlock(s.Default, out)
+			r.w.Dec()
+			r.w.Line(out, "}")
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+	case ast.DeferStmt:
+		r.w.Line(out, fmt.Sprintf("println!(\"{}\", %q);", s.Text))
+	case ast.HelperCallStmt:
+		args := strings.Join(s.Args, ", ")
+		r.w.Line(out, fmt.Sprintf("let mut %s = %s(%s);", s.Result, s.Name, args))
+	case ast.StructDecl:
+		r.w.Line(out, "#[derive(Debug, Clone)]")
+		r.w.Line(out, fmt.Sprintf("struct %s {", s.Name))
+		r.w.Inc()
+		for _, f := range s.Fields {
+			r.w.Line(out, fmt.Sprintf("%s: %s,", camelToSnake(f.Name), rustMapType(f.Type)))
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+		r.w.Blank(out)
+	case ast.InterfaceDecl:
+		r.w.Line(out, fmt.Sprintf("trait %s {", s.Name))
+		r.w.Inc()
+		for _, m := range s.Methods {
+			params := make([]string, 0, len(m.ParamTypes)+1)
+			params = append(params, "&self")
+			for i, pt := range m.ParamTypes {
+				params = append(params, fmt.Sprintf("arg%d: %s", i, rustMapType(pt)))
+			}
+			retType := rustMapType(m.ReturnType)
+			if retType == "()" || retType == "" {
+				r.w.Line(out, fmt.Sprintf("fn %s(%s);", m.Name, strings.Join(params, ", ")))
+			} else {
+				r.w.Line(out, fmt.Sprintf("fn %s(%s) -> %s;", m.Name, strings.Join(params, ", "), retType))
+			}
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+		r.w.Blank(out)
 	}
 }
 
 // RenderProgram renders a full Rust source file.
 func (r *RustRenderer) RenderProgram(program []ast.Statement) string {
 	var out strings.Builder
-	out.WriteString("#![allow(unused, dead_code, unreachable_code)]\n\n")
+	out.WriteString("#![allow(unused, dead_code, unreachable_code, non_snake_case)]\n\n")
+
+	var topDecls []ast.Statement
+	var setupStmts []ast.Statement
 	for _, stmt := range program {
+		switch stmt.(type) {
+		case ast.FuncDef, ast.StructDecl, ast.InterfaceDecl:
+			topDecls = append(topDecls, stmt)
+		default:
+			setupStmts = append(setupStmts, stmt)
+		}
+	}
+
+	for _, stmt := range topDecls {
 		r.renderStmt(stmt, &out)
 		out.WriteByte('\n')
 	}
+
+	if len(setupStmts) > 0 {
+		out.WriteString("fn setup() {\n")
+		r.w.Inc()
+		for _, stmt := range setupStmts {
+			r.renderStmt(stmt, &out)
+		}
+		r.w.Dec()
+		out.WriteString("}\n")
+	}
+
 	return out.String()
 }
 

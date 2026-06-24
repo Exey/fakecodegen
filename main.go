@@ -82,7 +82,7 @@ func usage() {
 
 Usage:
   Generate random files:
-    fakecodegen -lang <go|py|rs> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01] [-end-date 2025-06-01] [-commits-per-day 10]
+    fakecodegen -lang <go|py|rs|swift|kt> -folder <path> [-n <count>] [-prompt] [-start-date 2025-05-01] [-end-date 2025-06-01] [-commits-per-day 10]
 
   Reconstruct a repo from an archscope prompt:
     fakecodegen -from-prompt <ARCHSCOPE.md> -folder <path> [-lang <ext>] [-start-date 2025-05-01] [-end-date 2025-06-01] [-commits-per-day 10]
@@ -97,7 +97,7 @@ func parseStartDate(s string) (time.Time, error) {
 }
 
 func main() {
-	lang := flag.String("lang", "", "Language/extension for generated files: go, py, rs, js, ts (default: go; in -from-prompt mode: auto-detected per file)")
+	lang := flag.String("lang", "", "Language/extension for generated files: go, py, rs, swift, kt, js, ts (default: go; in -from-prompt mode: auto-detected per file)")
 	folder := flag.String("folder", "output", "Output directory")
 	count := flag.Int("n", 1, "Number of files to generate (normal mode only)")
 	promptFlag := flag.Bool("prompt", false, "Write ARCHSCOPE.md context prompt alongside the generated files")
@@ -179,9 +179,10 @@ func main() {
 			}
 
 			var program []ast.Statement
-			if ext == "go" {
+			switch ext {
+			case "go", "rs", "swift", "kt":
 				program = state.GenerateGoProgramWithDecls(fs.Decls, funcLineHints)
-			} else {
+			default:
 				program = state.GenerateProgramWithDeclsAndHints(fs.Decls, funcLineHints)
 			}
 
@@ -290,8 +291,8 @@ func main() {
 	if ext == "" {
 		ext = "go"
 	}
-	if ext != "go" && ext != "py" && ext != "rs" && ext != "js" && ext != "ts" {
-		fmt.Fprintf(os.Stderr, "error: unsupported -lang %q (use go, py, rs, js, or ts)\n", ext)
+	if ext != "go" && ext != "py" && ext != "rs" && ext != "swift" && ext != "kt" && ext != "js" && ext != "ts" {
+		fmt.Fprintf(os.Stderr, "error: unsupported -lang %q (use go, py, rs, swift, kt, js, or ts)\n", ext)
 		os.Exit(1)
 	}
 	if *count < 1 {
@@ -310,9 +311,10 @@ func main() {
 	for _, filename := range filenames {
 		state := generator.NewShared(5, sharedGenerated, names, rng)
 		var program []ast.Statement
-		if ext == "go" {
+		switch ext {
+		case "go", "rs", "swift", "kt":
 			program = state.GenerateGoProgram()
-		} else {
+		default:
 			program = state.GenerateProgram()
 		}
 

@@ -12,6 +12,40 @@ var swiftTypes = []string{"Int", "Int64", "Double", "String", "Bool"}
 var swiftReturnTypes = []string{"Int", "Double", "String", "Bool", "Void"}
 var swiftVarKeywords = []string{"let", "var"}
 
+var swiftTypeRemap = map[string]string{
+	"int":             "Int",
+	"int64":           "Int64",
+	"uint32":          "UInt32",
+	"string":          "String",
+	"bool":            "Bool",
+	"float64":         "Double",
+	"[]byte":          "Data",
+	"time.Time":       "Int64",
+	"error":           "Error",
+	"any":             "Any",
+	"context.Context": "Any",
+	"(string, error)": "(String, Error?)",
+	"(int, error)":    "(Int, Error?)",
+}
+
+func swiftMapType(t string) string {
+	if v, ok := swiftTypeRemap[t]; ok {
+		return v
+	}
+	return t
+}
+
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if r[0] >= 'A' && r[0] <= 'Z' {
+		r[0] = r[0] - 'A' + 'a'
+	}
+	return string(r)
+}
+
 // SwiftRenderer renders AST to Swift source.
 type SwiftRenderer struct {
 	w IndentWriter
@@ -105,16 +139,25 @@ func (r *SwiftRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 		r.w.Dec()
 		r.w.Line(out, "}")
 	case ast.FuncDef:
-		ret := randSwiftReturn()
+		retType := randSwiftReturn()
+		if s.ReturnType != "" {
+			retType = swiftMapType(s.ReturnType)
+		}
 		var params []string
-		for _, p := range s.ParamNames {
-			params = append(params, fmt.Sprintf("%s: %s", p, randSwiftType()))
+		if len(s.TypedParams) > 0 {
+			for _, tp := range s.TypedParams {
+				params = append(params, fmt.Sprintf("_ %s: %s", tp.Name, swiftMapType(tp.Type)))
+			}
+		} else {
+			for _, p := range s.ParamNames {
+				params = append(params, fmt.Sprintf("_ %s: %s", p, randSwiftType()))
+			}
 		}
 		paramStr := strings.Join(params, ", ")
-		if ret == "Void" {
+		if retType == "Void" || retType == "" {
 			r.w.Line(out, fmt.Sprintf("func %s(%s) {", s.Name, paramStr))
 		} else {
-			r.w.Line(out, fmt.Sprintf("func %s(%s) -> %s {", s.Name, paramStr, ret))
+			r.w.Line(out, fmt.Sprintf("func %s(%s) -> %s {", s.Name, paramStr, retType))
 		}
 		r.w.Inc()
 		r.renderBlock(s.Body, out)
@@ -124,19 +167,89 @@ func (r *SwiftRenderer) renderStmt(stmt ast.Statement, out *strings.Builder) {
 	case ast.ReturnStmt:
 		r.w.Line(out, fmt.Sprintf("return %s", r.renderExpr(s.Value)))
 	case ast.ExprStmt:
-		r.w.Line(out, fmt.Sprintf("%s", r.renderExpr(s.Expr)))
+		r.w.Line(out, r.renderExpr(s.Expr))
 	case ast.CommentStmt:
 		r.w.Line(out, fmt.Sprintf("// %s", s.Text))
+	case ast.SwitchStmt:
+		r.w.Line(out, fmt.Sprintf("switch %s {", s.Tag))
+		for _, c := range s.Cases {
+			r.w.Line(out, fmt.Sprintf("case %d:", c.Value))
+			r.w.Inc()
+			r.renderBlock(c.Body, out)
+			r.w.Dec()
+		}
+		if len(s.Default) > 0 {
+			r.w.Line(out, "default:")
+			r.w.Inc()
+			r.renderBlock(s.Default, out)
+			r.w.Dec()
+		}
+		r.w.Line(out, "}")
+	case ast.DeferStmt:
+		r.w.Line(out, fmt.Sprintf("defer { print(%q) }", s.Text))
+	case ast.HelperCallStmt:
+		args := strings.Join(s.Args, ", ")
+		r.w.Line(out, fmt.Sprintf("let %s = %s(%s)", s.Result, s.Name, args))
+	case ast.StructDecl:
+		r.w.Line(out, fmt.Sprintf("struct %s {", s.Name))
+		r.w.Inc()
+		for _, f := range s.Fields {
+			r.w.Line(out, fmt.Sprintf("var %s: %s", lowerFirst(f.Name), swiftMapType(f.Type)))
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+		r.w.Blank(out)
+	case ast.InterfaceDecl:
+		r.w.Line(out, fmt.Sprintf("protocol %s {", s.Name))
+		r.w.Inc()
+		for _, m := range s.Methods {
+			var params []string
+			for i, pt := range m.ParamTypes {
+				params = append(params, fmt.Sprintf("arg%d: %s", i, swiftMapType(pt)))
+			}
+			retType := swiftMapType(m.ReturnType)
+			if retType == "Void" || retType == "" {
+				r.w.Line(out, fmt.Sprintf("func %s(%s)", lowerFirst(m.Name), strings.Join(params, ", ")))
+			} else {
+				r.w.Line(out, fmt.Sprintf("func %s(%s) -> %s", lowerFirst(m.Name), strings.Join(params, ", "), retType))
+			}
+		}
+		r.w.Dec()
+		r.w.Line(out, "}")
+		r.w.Blank(out)
 	}
 }
 
 // RenderProgram renders a full Swift source file.
 func (r *SwiftRenderer) RenderProgram(program []ast.Statement) string {
 	var out strings.Builder
+
+	var topDecls []ast.Statement
+	var setupStmts []ast.Statement
 	for _, stmt := range program {
+		switch stmt.(type) {
+		case ast.FuncDef, ast.StructDecl, ast.InterfaceDecl:
+			topDecls = append(topDecls, stmt)
+		default:
+			setupStmts = append(setupStmts, stmt)
+		}
+	}
+
+	for _, stmt := range topDecls {
 		r.renderStmt(stmt, &out)
 		out.WriteByte('\n')
 	}
+
+	if len(setupStmts) > 0 {
+		out.WriteString("func setup() {\n")
+		r.w.Inc()
+		for _, stmt := range setupStmts {
+			r.renderStmt(stmt, &out)
+		}
+		r.w.Dec()
+		out.WriteString("}\n")
+	}
+
 	return out.String()
 }
 

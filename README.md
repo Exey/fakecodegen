@@ -71,6 +71,10 @@ fakecodegen -lang py -folder ./output -n 5
 # 8 Rust files plus an ARCHSCOPE.md context prompt
 fakecodegen -lang rs -folder ./output -n 8 -prompt
 
+# Swift or Kotlin
+fakecodegen -lang swift -folder ./output -n 5
+fakecodegen -lang kt -folder ./output -n 5
+
 # TypeScript or JavaScript
 fakecodegen -lang ts -folder ./output -n 5
 fakecodegen -lang js -folder ./output -n 5
@@ -138,7 +142,6 @@ fakecodegen -from-prompt ARCHSCOPE.md -folder ./fake-repo -prompt
 4. Sloppy comments (`// trust me bro`, `// HACK: this works somehow`, …) are sprinkled in at ~18% probability.
 
 In `-from-prompt` mode the declaration names extracted from the prompt are used directly as function names, and `maxDepth` is tuned per-file so the rendered output lands near the target line count.
-
 
 ## License
 
